@@ -34,6 +34,11 @@ blender --background --factory-startup --python tools/patch_dts_animation.py \
 
 - `sidecar.json` is emitted by `retarget_mixamo.py` (per-node local keyframes).
 - `seq_name` e.g. `run` (forward locomotion, made cyclic), `taunt 1` (one-shot).
+- `duration` (optional, 6th arg): seconds, or `keep` to preserve the original
+  sequence's duration. Locomotion (run/walk/strafe) is speed-synced by the
+  engine using `duration`, so use `keep` (or the stock value) to avoid
+  foot-sliding; otherwise it defaults to frames/fps (natural speed, good for
+  one-shots). Example: `... run 1 keep`.
 - With no sidecar it does an identity rebuild (validates the read/write path).
 - Geometry, materials, and all other sequences are preserved verbatim.
 

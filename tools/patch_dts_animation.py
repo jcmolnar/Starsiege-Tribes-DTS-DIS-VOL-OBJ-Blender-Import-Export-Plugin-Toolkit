@@ -20,9 +20,13 @@ ADDON = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def _args():
     a = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     if len(a) < 2:
-        print("usage: -- <orig.dts> <out.dts> [sidecar.json] [seq_name] [cyclic 0/1]"); sys.exit(2)
+        print("usage: -- <orig.dts> <out.dts> [sidecar.json] [seq_name] [cyclic 0/1] [duration]"); sys.exit(2)
     cyclic = int(a[4]) if len(a) > 4 else 1
-    return a[0], a[1], (a[2] if len(a) > 2 else None), (a[3] if len(a) > 3 else "run"), cyclic
+    # duration: a number of seconds, or 'keep' to preserve the original sequence's
+    # duration (best for locomotion so the engine speed-syncs like stock), or
+    # omitted -> frames/fps (natural speed, good for one-shots).
+    duration = a[5] if len(a) > 5 else None
+    return a[0], a[1], (a[2] if len(a) > 2 else None), (a[3] if len(a) > 3 else "run"), cyclic, duration
 
 def _stage():
     tmp = tempfile.mkdtemp(prefix="tribes_dts_")
@@ -82,7 +86,7 @@ def build_shape_data(s, names_str):
         'default_material': getattr(s, 'default_material', 1),
     }
 
-def replace_sequence(sd, names_str, seq_name, sidecar, cyclic=1):
+def replace_sequence(sd, names_str, seq_name, sidecar, cyclic=1, duration=None):
     """Replace seq_name's keyframes in place.
 
     The subsequence ARRAY is referenced by both nodes and objects via
@@ -94,7 +98,12 @@ def replace_sequence(sd, names_str, seq_name, sidecar, cyclic=1):
     seq_idx = next(i for i, q in enumerate(sd['sequences']) if names_str[q['name']] == seq_name)
     N = sidecar['frames']
     sd['sequences'][seq_idx]['cyclic'] = cyclic
-    sd['sequences'][seq_idx]['duration'] = N / float(sidecar.get('fps', 30))
+    if duration == 'keep':
+        pass  # preserve original duration (locomotion speed-sync matches stock)
+    elif duration is not None:
+        sd['sequences'][seq_idx]['duration'] = float(duration)
+    else:
+        sd['sequences'][seq_idx]['duration'] = N / float(sidecar.get('fps', 30))
 
     # Map each subsequence index -> owning node name (transform tracks live on nodes)
     owner = {}
@@ -127,7 +136,7 @@ def replace_sequence(sd, names_str, seq_name, sidecar, cyclic=1):
     print(f"  replaced {replaced} node subsequences for '{seq_name}'")
 
 def main():
-    orig_path, out_path, sidecar_path, seq_name, cyclic = _args()
+    orig_path, out_path, sidecar_path, seq_name, cyclic, duration = _args()
     tmp = _stage()
     try:
         from tribes_dts_pkg.dts import Dts
@@ -139,7 +148,7 @@ def main():
 
         if sidecar_path:
             sidecar = json.load(open(sidecar_path))
-            replace_sequence(sd, names_str, seq_name, sidecar, cyclic)
+            replace_sequence(sd, names_str, seq_name, sidecar, cyclic, duration)
             print(f"replaced '{seq_name}' (cyclic={cyclic}): kfs={sd['num_keyframes']} xfs={sd['num_transforms']}")
         else:
             print("IDENTITY rebuild (no sidecar)")
