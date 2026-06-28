@@ -21,6 +21,35 @@ blender --background --factory-startup \
 - Method: world-orientation-copy for body/legs/spine (alignment `A = Rz(180)`),
   direction-aim for the arms (Tribes arm rest is tucked vs Mixamo T-pose).
 
+## patch_dts_animation.py
+Inject a retargeted animation into a character DTS by **replacing a named
+sequence** (the engine plays animations by sequence name — see
+`docs/` and memory). Works directly on the DTS binary (reuses `DTSWriter`),
+so it bypasses the Blender exporter and its node hard-filter.
+
+```
+blender --background --factory-startup --python tools/patch_dts_animation.py \
+    -- "<original.dts>" "<output.dts>" "<sidecar.json>" "<seq_name>"
+```
+
+- `sidecar.json` is emitted by `retarget_mixamo.py` (per-node local keyframes).
+- `seq_name` e.g. `run` (forward locomotion, made cyclic), `taunt 1` (one-shot).
+- `duration` (optional, 6th arg): seconds, or `keep` to preserve the original
+  sequence's duration. Locomotion (run/walk/strafe) is speed-synced by the
+  engine using `duration`, so use `keep` (or the stock value) to avoid
+  foot-sliding; otherwise it defaults to frames/fps (natural speed, good for
+  one-shots). Example: `... run 1 keep`.
+- With no sidecar it does an identity rebuild (validates the read/write path).
+- Geometry, materials, and all other sequences are preserved verbatim.
+
+Full pipeline:
+```
+# 1. retarget -> blend + sidecar
+blender ... --python tools/retarget_mixamo.py -- char.dts anim.fbx out.blend
+# 2. patch the 'run' sequence into a new DTS
+blender ... --python tools/patch_dts_animation.py -- char.dts char_run.dts out_sidecar.json run
+```
+
 ## render_preview.py
 Render a posed character `.blend` to front/side PNGs (LOD36 only) for review.
 

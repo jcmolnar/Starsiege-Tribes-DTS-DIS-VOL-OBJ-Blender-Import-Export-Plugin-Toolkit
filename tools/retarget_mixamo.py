@@ -118,6 +118,9 @@ def main():
         Wsrc_rest = {mb: swr(mb) for mb in set(TGT2SRC.values())}
         A = Quaternion((0, 0, 1), math.pi)
 
+        # Sidecar of per-node local keyframes for the DTS animation patcher.
+        sidecar = {"fps": 30, "frames": f1 - f0 + 1, "nodes": {}}
+
         for f in range(f0, f1 + 1):
             bpy.context.scene.frame_set(f)
             Dd = {mb: (sw(mb) @ Wsrc_rest[mb].inverted()) for mb in set(TGT2SRC.values())}
@@ -138,15 +141,23 @@ def main():
                     worldq[n] = pq @ restL_rot[n]
                 if src:
                     o = tribes[n]
-                    o.rotation_quaternion = pq.inverted() @ worldq[n]
+                    q = pq.inverted() @ worldq[n]
+                    o.rotation_quaternion = q
                     o.keyframe_insert("rotation_quaternion", frame=f - f0 + 1)
+                    lc = restL_loc[n]  # rotation-only retarget: keep rest translation
+                    sidecar["nodes"].setdefault(n, []).append(
+                        [q.w, q.x, q.y, q.z, lc.x, lc.y, lc.z])
 
         bpy.context.scene.frame_start = 1
         bpy.context.scene.frame_end = f1 - f0 + 1
         for o in [o for o in bpy.data.objects if o.type == 'ARMATURE']:
             bpy.data.objects.remove(o, do_unlink=True)
         bpy.ops.wm.save_as_mainfile(filepath=out)
+        import json
+        sidecar_path = os.path.splitext(out)[0] + "_sidecar.json"
+        json.dump(sidecar, open(sidecar_path, "w"))
         print(f"RETARGET OK: {os.path.basename(fbx)} -> {out} ({f1 - f0 + 1} frames)")
+        print(f"SIDECAR: {sidecar_path} ({len(sidecar['nodes'])} nodes)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
