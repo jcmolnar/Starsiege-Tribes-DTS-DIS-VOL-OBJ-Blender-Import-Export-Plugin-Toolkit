@@ -2435,7 +2435,15 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                         for i in range(len(orig_meshes)):
                             # Find the name associated with original mesh index i
                             name = next((n for n, idx in orig_name_to_mesh_idx.items() if idx == i), None)
-                            if name and name in exp_name_to_chunk:
+                            # The 'bounds' mesh is synthesized by the exporter: the importer
+                            # turns the bounds object into an empty, discarding its original
+                            # 2-vertex culling box, so the exported chunk is wrong (inflated /
+                            # whole-model extents). The bounds box is never edited in Blender,
+                            # so reuse the ORIGINAL bounds mesh bytes for a faithful round-trip.
+                            if name and name.lower() == 'bounds':
+                                blk = orig_meshes[i]
+                                hybrid += original_bytes[blk['pos'] : blk['pos'] + blk['size']]
+                            elif name and name in exp_name_to_chunk:
                                 hybrid += exp_name_to_chunk[name]
                             else:
                                 # Fallback: if name not found, use index-based or original
