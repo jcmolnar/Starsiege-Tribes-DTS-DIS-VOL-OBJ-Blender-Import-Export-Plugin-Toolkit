@@ -37,6 +37,15 @@ if _addon_dir not in sys.path:
 
 from kaitaistruct import KaitaiStream
 
+# Use the same DTS parser as the importer (dts.py). Previously this module
+# relied on the untracked scratch file dts_inspect.py and on a bare `Dts`
+# name that was never imported (a latent NameError swallowed by try/except,
+# which silently disabled name-based mesh->bone mapping during round-trips).
+try:
+    from .dts import Dts
+except ImportError:
+    from dts import Dts
+
 print("DEBUG: LOADING export_dts.py MODULE v1.0.1 - FLATTEN HIERARCHY SUPPORT")
 
 
@@ -1218,8 +1227,7 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
         
         if original_dts_path and os.path.exists(original_dts_path):
             try:
-                from . import dts_inspect
-                donor_dts = dts_inspect.Dts.from_file(original_dts_path)
+                donor_dts = Dts.from_file(original_dts_path)
                 donor_shape = donor_dts.shape.data.obj_data
                 donor_names = [n.split(b'\x00')[0].decode('ascii', errors='ignore') for n in donor_shape.names]
                 donor_nodes = getattr(donor_shape, 'nodes', []) or getattr(donor_shape, 'nodes_v7', [])
