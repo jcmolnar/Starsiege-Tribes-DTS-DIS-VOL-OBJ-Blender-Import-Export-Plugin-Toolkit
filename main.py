@@ -13,7 +13,7 @@ import bmesh
 import mathutils
 from bpy import ops
 from bpy_extras.io_utils import ImportHelper
-from bpy.props import StringProperty, FloatProperty
+from bpy.props import StringProperty, FloatProperty, BoolProperty
 
 
 '''
@@ -71,12 +71,19 @@ class ImportDTS(bpy.types.Operator, ImportHelper):
     
     import_scale: FloatProperty(
         name="Import Scale",
-        description="Scale multiplier for imported geometry (DTS uses small units). Use 1.0 for correct round-trip export.",
+        description="[BOTH] Scale multiplier for imported geometry. Use 1.0 for correct round-trip export",
         default=1.0,
         min=0.01,
         max=1000.0
     )
     
+    organize_by_lod: BoolProperty(
+        name="Organize by LOD",
+        description="[BOTH] Create collections for each LOD level (36/10/2) for easier editing. Edit only LOD36 if using 'High LOD for All' on export",
+        default=True,
+    )
+    
+
     def execute(self, context):
         global frame_id
         import re
@@ -908,5 +915,53 @@ class ImportDTS(bpy.types.Operator, ImportHelper):
                         node_id += 1
                     frame_id += last_subseq_len
                 scene.timeline_markers.new('End of {}'.format(seq_name), frame=frame_id)
+        
+        # =========================================================================
+        # LOD ORGANIZATION: Create collections for each LOD level
+        # =========================================================================
+        if self.organize_by_lod:
+            lod_collections = {
+                '36': 'LOD_36_High',
+                '10': 'LOD_10_Medium', 
+                '2': 'LOD_02_Low',
+                'other': 'LOD_Other'
+            }
+            
+            # Create LOD collections if they don't exist
+            for key, name in lod_collections.items():
+                if name not in bpy.data.collections:
+                    coll = bpy.data.collections.new(name)
+                    context.scene.collection.children.link(coll)
+            
+            # Get references to collections
+            collections = {k: bpy.data.collections[v] for k, v in lod_collections.items()}
+            
+            # Move mesh objects to appropriate LOD collections
+            moved_counts = {'36': 0, '10': 0, '2': 0, 'other': 0}
+            for obj in list(bpy.data.objects):
+                if obj.type != 'MESH':
+                    continue
+                
+                name = obj.name
+                lod = 'other'
+                if name.endswith(' 36') or name.endswith('36'):
+                    lod = '36'
+                elif name.endswith(' 10') or name.endswith('10'):
+                    lod = '10'
+                elif name.endswith(' 2') or name.endswith('2'):
+                    lod = '2'
+                
+                target_coll = collections[lod]
+                
+                # Unlink from ALL current collections first (this makes eye toggle work!)
+                for coll in list(obj.users_collection):
+                    coll.objects.unlink(obj)
+                
+                # Link to LOD collection
+                target_coll.objects.link(obj)
+                moved_counts[lod] += 1
+
+            
+            print(f"LOD Organization: High={moved_counts['36']}, Medium={moved_counts['10']}, Low={moved_counts['2']}, Other={moved_counts['other']}")
                     
         return {'FINISHED'}

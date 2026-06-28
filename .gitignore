@@ -30,16 +30,19 @@ memory/
 # --- Misc working files ---
 *.bat
 
-# --- Working / export directories ---
+# --- Working / export directories (incl. space-named scratch dirs) ---
 Package/
 TOTALPACKAGE/
 TribesSource/
 mesh_exports/
 old files/
 OBJ animations/
+.dts files/
+.log files/
+.txt files/
 
 # --- Scratch / experiment scripts (NOT part of the plugin) ---
-# The plugin itself is only: __init__.py, main.py, dts.py, dts.ksy, kaitaistruct.py
+# The plugin itself is: __init__.py, main.py, dts.py, export_dts.py, dts.ksy, kaitaistruct.py
 add_animations.py
 adjust_*.py
 align_*.py
@@ -71,6 +74,7 @@ full_parse.py
 mesh_compare.py
 dump_*.py
 export_*.py
+!export_dts.py
 extract_*.py
 find_*.py
 fix_mesh_origins.py
