@@ -37,6 +37,15 @@ if _addon_dir not in sys.path:
 
 from kaitaistruct import KaitaiStream
 
+# Use the same DTS parser as the importer (dts.py). Previously this module
+# relied on the untracked scratch file dts_inspect.py and on a bare `Dts`
+# name that was never imported (a latent NameError swallowed by try/except,
+# which silently disabled name-based mesh->bone mapping during round-trips).
+try:
+    from .dts import Dts
+except ImportError:
+    from dts import Dts
+
 print("DEBUG: LOADING export_dts.py MODULE v1.0.1 - FLATTEN HIERARCHY SUPPORT")
 
 
@@ -1218,8 +1227,7 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
         
         if original_dts_path and os.path.exists(original_dts_path):
             try:
-                from . import dts_inspect
-                donor_dts = dts_inspect.Dts.from_file(original_dts_path)
+                donor_dts = Dts.from_file(original_dts_path)
                 donor_shape = donor_dts.shape.data.obj_data
                 donor_names = [n.split(b'\x00')[0].decode('ascii', errors='ignore') for n in donor_shape.names]
                 donor_nodes = getattr(donor_shape, 'nodes', []) or getattr(donor_shape, 'nodes_v7', [])
@@ -1720,7 +1728,60 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                 texture_verts = [(0.0, 0.0)]
                 for loop in mesh.loops:
                     loop_to_uv_idx[loop.index] = 0
-                
+
+            # =====================================================================
+            # FAITHFUL ROUND-TRIP FAST PATH
+            # ---------------------------------------------------------------------
+            # The importer stores each mesh's vertices in their original DTS
+            # node-local frame (v.co == packed*scale + origin) and saves the exact
+            # original frame scale/origin as custom props. For an UNMODIFIED
+            # imported object we must reproduce that exactly. The general path
+            # above reprojects through node_inv @ matrix_world (which does NOT
+            # reconstruct the original frame once origin_set leaves a residual
+            # object transform), splits shared verts, and re-injects the culling
+            # box -- all of which corrupt weapon/character round-trips.
+            #
+            # When faithful, bypass that: pack v.co directly against the stored
+            # scale/origin, in original vertex order (keeping the culling box at
+            # indices 0/1), one normal per vertex, no splitting, no box re-inject.
+            # Only applies to plain round-trips (import_scale 1.0, no axis/winding
+            # conversion, no donor sync, no shape keys, unmodified vertex count
+            # and unit world scale); new/edited models keep the general path.
+            faithful = (
+                "dts_frame_scale_x" in obj
+                and abs(obj.get("dts_import_scale", 1.0) - 1.0) < 1e-6
+                and not self.convert_axes
+                and not self.convert_winding
+                and not use_donor_sync
+                and obj.data.shape_keys is None
+                and obj.get("dts_vertex_count", -1) == len(mesh.vertices)
+                and all(abs(s - 1.0) <= 0.001 for s in obj.matrix_world.to_scale())
+            )
+            if faithful:
+                frame_scale = (obj["dts_frame_scale_x"],
+                               obj["dts_frame_scale_y"],
+                               obj["dts_frame_scale_z"])
+                frame_origin = (obj["dts_frame_origin_x"],
+                                obj["dts_frame_origin_y"],
+                                obj["dts_frame_origin_z"])
+                geometry_modified = False
+                packed_verts = []
+                for v in mesh.vertices:
+                    co = v.co
+                    comps = []
+                    for i in range(3):
+                        sc = frame_scale[i]
+                        comps.append(int(round((co[i] - frame_origin[i]) / sc)) if sc else 0)
+                    x, y, z = (max(0, min(255, c)) for c in comps)
+                    packed_verts.append((x, y, z, find_closest_normal(v.normal)))
+                # Identity loop->vertex mapping (no splitting)
+                loop_to_dts_vert = {li: mesh.loops[li].vertex_index
+                                    for poly in mesh.polygons
+                                    for li in poly.loop_indices}
+                # Keep min_pt/bounds_size consistent for any downstream packing
+                min_pt = frame_origin
+                bounds_size = tuple(max(0.0001, s * 255.0) for s in frame_scale)
+
             # Check if object has negative scale (determinant < 0)
             # Negative determinant means additional flip is needed
             is_flipped = obj.matrix_world.determinant() < 0
@@ -2374,7 +2435,15 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                         for i in range(len(orig_meshes)):
                             # Find the name associated with original mesh index i
                             name = next((n for n, idx in orig_name_to_mesh_idx.items() if idx == i), None)
-                            if name and name in exp_name_to_chunk:
+                            # The 'bounds' mesh is synthesized by the exporter: the importer
+                            # turns the bounds object into an empty, discarding its original
+                            # 2-vertex culling box, so the exported chunk is wrong (inflated /
+                            # whole-model extents). The bounds box is never edited in Blender,
+                            # so reuse the ORIGINAL bounds mesh bytes for a faithful round-trip.
+                            if name and name.lower() == 'bounds':
+                                blk = orig_meshes[i]
+                                hybrid += original_bytes[blk['pos'] : blk['pos'] + blk['size']]
+                            elif name and name in exp_name_to_chunk:
                                 hybrid += exp_name_to_chunk[name]
                             else:
                                 # Fallback: if name not found, use index-based or original
