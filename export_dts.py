@@ -1516,6 +1516,16 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                 mesh.from_pydata([rel_min, rel_max], [], []) # 2 Verts defining the diagonal
                 print(f"DEBUG: Generated bounds mesh matching header: {rel_min} to {rel_max}")
             else:
+                # Vertex-morph (frame-track) meshes: the per-frame geometry lives in
+                # the shape keys, which we read separately. Zero all key values first
+                # so the EVALUATED basis mesh is the rest pose, not basis + the sum of
+                # every relative key (which inflates/skews the bounds and packing).
+                if obj.type == 'MESH' and obj.data.shape_keys:
+                    for _skb in obj.data.shape_keys.key_blocks:
+                        _skb.value = 0.0
+                    # depsgraph must re-evaluate or evaluated_get() returns the stale
+                    # (non-zero-valued) mesh and the bounds inflate.
+                    depsgraph.update()
                 # Get evaluated mesh (with modifiers applied)
                 if self.apply_modifiers:
                     try:
@@ -1584,10 +1594,26 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                     min_local[i] = min(min_local[i], v_s[i])
                     max_local[i] = max(max_local[i], v_s[i])
 
-            
+            # Vertex-morph (shape-key) animation: expand the packing bounds to the
+            # UNION over ALL frames. The 8-bit packed verts are normalized to this
+            # box; if a morph frame moves a vertex outside the rest frame's box it
+            # would clamp to 0/255 and flatten (the "thin sliver" bug). Same
+            # node-space transform as the base verts above.
+            if original_mesh_data and original_mesh_data.shape_keys:
+                for _kb in original_mesh_data.shape_keys.key_blocks:
+                    for _d in _kb.data:
+                        _wv = obj.matrix_world @ _d.co
+                        _vn = node_matrix_inv @ _wv
+                        _vs = [_vn[i] * self.global_scale for i in range(3)]
+                        if self.convert_axes:
+                            _vs = [_vs[0], _vs[2], -_vs[1]]
+                        for i in range(3):
+                            min_local[i] = min(min_local[i], _vs[i])
+                            max_local[i] = max(max_local[i], _vs[i])
+
             min_pt = tuple(min_local)
             max_pt = tuple(max_local)
-            
+
             # Compute bounds size in local space
             bounds_size = (
                 max(0.0001, max_pt[0] - min_pt[0]),
@@ -2248,10 +2274,15 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                     first_k = len(shape_data['keyframes'])
                     num_k = 0
                     for f in range(start_f, end_f + 1):
-                        if f < mesh_data['num_frames']:
+                        # Map the morph frame RELATIVE to this sequence's start, so EACH
+                        # sequence (activation/fire/reload) plays the morph from frame 0.
+                        # (Absolute f only worked for a sequence starting at frame 0/1,
+                        # so fire/reload after it got no morph.)
+                        rel = f - start_f
+                        if rel < mesh_data['num_frames']:
                             shape_data['keyframes'].append({
                                 'position': float(num_k) / max(1.0, float(end_f - start_f)),
-                                'key_value': f,
+                                'key_value': rel,
                                 'mat_index': FLAG_FRAME_TRACK,
                             })
                             num_k += 1
