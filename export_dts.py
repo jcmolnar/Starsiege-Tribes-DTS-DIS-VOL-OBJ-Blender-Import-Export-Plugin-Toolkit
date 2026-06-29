@@ -906,9 +906,21 @@ class DTSWriter:
         if self.shape_version >= 5:
             self.write_u32(stream, shape_data.get('default_material', 1))
             
-        # Always animate (v6+)
+        # Always-animate node (v6+): fAlwaysNode is the index of the node named
+        # "always" (the engine animates it regardless of detail level), or -1 if
+        # there is none. Previously hardcoded to 1, which only happens to be right
+        # when "always" is node 1 (true for stock characters/weapons) and pointed
+        # at the wrong node for shapes lacking an "always" node.
         if self.shape_version >= 6:
-            self.write_s32(stream, 1) # Match Axe.dts 1
+            always_idx = -1
+            for i, node in enumerate(shape_data['nodes']):
+                nidx = node['name']
+                nm = self.names[nidx] if 0 <= nidx < len(self.names) else ''
+                # names are null-padded fixed-width fields; strip padding before compare
+                if nm.split('\x00')[0].strip().lower() == 'always':
+                    always_idx = i
+                    break
+            self.write_s32(stream, always_idx)
             
     def write_ts_animmesh(self, stream, mesh_data):
         """Write TS::CelAnimMesh section."""
@@ -1444,8 +1456,12 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                 if dist > radius:
                     radius = dist
                     
-        # EXCEPTION: If a 'bounds' object exists, it should strictly define the physical limits
-        # (This matches how Axe.dts uses its 2-vertex bounds mesh)
+        # If a 'bounds' object exists, honor its authored culling box -- but UNION it
+        # with the geometry box rather than replacing it. The engine's fBounds must
+        # always enclose the actual geometry (Shape::read stores it directly in v8 and
+        # culls/clips against it); shipping a box smaller than the model -- e.g. a donor
+        # 'bounds' mesh left over after geometry was swapped in -- makes parts vanish or
+        # mis-cull. Union guarantees enclosure while preserving any intentional padding.
         for obj in objects:
             if obj.name.lower().startswith('bounds'):
                 if obj.type == 'MESH' and len(obj.data.vertices) >= 2:
@@ -1461,11 +1477,11 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                         for i in range(3):
                             b_min[i] = min(b_min[i], v_scaled[i])
                             b_max[i] = max(b_max[i], v_scaled[i])
-                    shape_min_all = b_min
-                    shape_max_all = b_max
-                    center = tuple((b_min[i] + b_max[i]) / 2.0 for i in range(3))
-                    # For custom bounds, we still want a radius that covers the box corners
-                    radius = 0.5 * math.sqrt(sum((b_max[i] - b_min[i])**2 for i in range(3)))
+                    shape_min_all = [min(shape_min_all[i], b_min[i]) for i in range(3)]
+                    shape_max_all = [max(shape_max_all[i], b_max[i]) for i in range(3)]
+                    center = tuple((shape_min_all[i] + shape_max_all[i]) / 2.0 for i in range(3))
+                    # Radius covers the box corners (safe over-estimate => no false culling)
+                    radius = 0.5 * math.sqrt(sum((shape_max_all[i] - shape_min_all[i])**2 for i in range(3)))
                 break
 
         
