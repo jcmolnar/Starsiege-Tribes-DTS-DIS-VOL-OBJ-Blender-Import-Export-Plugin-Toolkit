@@ -365,6 +365,29 @@ def find_closest_normal(normal):
     return best_idx
 
 
+def material_map_file(mat):
+    """Texture filename for the DTS material list.
+
+    Prefer the actual image plugged into the material's node tree (what the
+    engine must load), falling back to the material name. Blender-side .png
+    conversions are mapped back to the engine's .bmp naming, mirroring the
+    importer's .bmp -> .png substitution.
+    """
+    try:
+        if mat.use_nodes:
+            for node in mat.node_tree.nodes:
+                if node.type == 'TEX_IMAGE' and node.image:
+                    name = os.path.basename(node.image.filepath) or node.image.name
+                    base, ext = os.path.splitext(name)
+                    if ext.lower() == '.png':
+                        name = base + '.bmp'
+                    if name:
+                        return name
+    except Exception:
+        pass
+    return mat.name
+
+
 def iter_anim_fcurves(anim_data):
     """Yield fcurves from AnimData across legacy AND slotted (Blender 4.4+)
     actions. Blender 5.0 removed Action.fcurves for layered actions; the
@@ -1985,7 +2008,7 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                         # shapes, which the engine mis-handled -> crash on equip.
                         'index': 0,
                         'rgb': (255, 255, 255),
-                        'map_file': mat.name[:32],
+                        'map_file': material_map_file(mat)[:31],
                         'type': 0,
                         'elasticity': 1.0,
                         'friction': 1.0,
