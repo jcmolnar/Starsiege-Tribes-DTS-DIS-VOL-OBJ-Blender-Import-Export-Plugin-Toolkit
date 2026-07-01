@@ -42,6 +42,12 @@ Developed against Blender 3.0+ (current work is on 5.0).
 - Write meshes and node/sequence animation back out to `.DTS`
 - **Character round-trips** (import → edit → export) are the validated path
 - Material list and LOD structure preserved
+- **Multi-texture models** — multiple single-material meshes with correct material
+  `fIndex` (a texture material's index is 0; the per-mesh split avoids the
+  mixed-material-per-mesh crash on equip)
+- **Vertex-morph (shape-key) animation** — bake any source animation into per-frame
+  shape keys and export a `CelAnimMesh` frame-track; used to give weapons their own
+  swing/attack animation
 
 ### Animation pipeline (`tools/`)
 A headless workflow for getting new character animations into the game:
@@ -86,10 +92,16 @@ Useful docs:
 
 - **Characters:** import, export, round-trip, and Mixamo animation injection work
   in-game (players and AI bots).
-- **Weapons:** a fresh-from-scratch weapon export can produce a DTS the engine
-  rejects on equip; the reliable approach is to transplant new geometry into a
-  known-good donor weapon DTS (keeping its animation/bounds/structure). A
-  general exporter fix for fresh weapon authoring is still open.
+- **Weapons:** the proven authoring path is to **transplant** new geometry into a
+  known-good donor weapon DTS (keeping its mount/animation/bounds/structure), which
+  gives a correct in-hand mount for free. Pick the donor by class so the weapon
+  inherits a fitting animation (broadsword/katana/elfinblade for swords, battleaxe
+  for axes, mace/hammer for bludgeons, spear/trident for polearms, dagger/knife).
+  Custom animation is added by baking a shape-key morph and injecting it as a
+  frame-track. This pipeline shipped **46 weapons/shields/orbs** into the Kingdom of
+  Kronos RPG. A fully general *fresh* (donor-less) weapon exporter is still open.
+- **Textures:** weapon/shield skins are 8-bit MS-BMP indexed to a world multipalette
+  (`bfReserved2` = paletteIndex); the orb accessory shape needs native **PBMP**.
 - Sub-animations (e.g. vehicle flames) and some vertex animations (Sensor
   Jammer) are not fully supported.
 - Animated UVs are not supported.
@@ -99,7 +111,6 @@ Useful docs:
 ## Wishlist
 - Robust fresh weapon export (no donor transplant needed)
 - Bone-based animation (auto-create bones, actions instead of markers)
-- Vertex/morph animation support
 - Animated UVs
 - Support for `DIS`, `TED`, and `DIL` files
 
