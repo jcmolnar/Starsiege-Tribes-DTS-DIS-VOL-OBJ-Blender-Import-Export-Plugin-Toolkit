@@ -180,34 +180,27 @@ class ImportDTS(bpy.types.Operator, ImportHelper):
                 object = bpy.context.scene.objects[names[obj.name]]
                 if isFrameTrackKeyframe:
                     print('Frame track!!!')
-                    # Frame 0 is the Basis, keyframes start with frame 1
-                    first_vert = frames[0].first_vert
-                    sk_basis = object.shape_key_add(name='Basis', from_mix=False)
-                    sk_basis.interpolation = 'KEY_LINEAR'
-                    object.data.shape_keys.use_relative = True
+                    # Morph frames were already imported as correctly-decoded
+                    # shape keys (named frame_NNN, per-frame scale/origin
+                    # applied) right after mesh creation. Here we only ANIMATE
+                    # their values along the timeline. (This code previously
+                    # ADDED its own keys with raw PACKED 0-255 coords -- garbage
+                    # geometry that also inflated export packing bounds.)
+                    sk_data = object.data.shape_keys
+                    if not sk_data:
+                        print('  no shape keys on object; frame track skipped')
+                        return
+                    sk_data.use_relative = True
 
                     sks = []
                     for key in range(first_keyframe, first_keyframe + subseq.num_keyframes):
                         frametrack_key = keyframes[key].key_value
-
-                        # Create new shape key
-                        sk = object.shape_key_add(name='Frame {}'.format(frametrack_key), from_mix=False)
+                        sk = sk_data.key_blocks.get('frame_{:03d}'.format(frametrack_key))
+                        if sk is None:
+                            # frame 0 == basis: showing it means all keys at 0,
+                            # which the sequencing loop below handles via prev_sk
+                            continue
                         sk.interpolation = 'KEY_LINEAR'
-
-                        start_vertex = frames[frametrack_key].first_vert
-                        for vrt_idx in range(mesh.num_vertices_per_frame):
-                            print('{}, {}, {} -> {}, {}, {}'.format(
-                                sk.data[vrt_idx].co.x,
-                                sk.data[vrt_idx].co.y,
-                                sk.data[vrt_idx].co.z,
-                                mesh.vertices[start_vertex + vrt_idx].x,
-                                mesh.vertices[start_vertex + vrt_idx].y,
-                                mesh.vertices[start_vertex + vrt_idx].z
-                            ))
-                            sk.data[vrt_idx].co.x = mesh.vertices[start_vertex + vrt_idx].x
-                            sk.data[vrt_idx].co.y = mesh.vertices[start_vertex + vrt_idx].y
-                            sk.data[vrt_idx].co.z = mesh.vertices[start_vertex + vrt_idx].z
-                        print('=============')
                         sk.value = 0
                         sk.keyframe_insert(data_path="value", index=-1)
                         sks.append(sk)
@@ -722,6 +715,29 @@ class ImportDTS(bpy.types.Operator, ImportHelper):
                 object["dts_import_scale"] = self.import_scale
                 object["dts_mesh_radius"] = mesh_data.radius
                 object["dts_vertex_count"] = mesh_data.num_vertices_per_frame
+                # Also stamped per-object: the LOD organizer MOVES objects out
+                # of the source collection into LOD_* collections, which made
+                # the exporter's collection-prop lookup fail (no header splice).
+                object["dts_source_file"] = path
+
+                # Per-frame layout for vertex-morph (frame track) meshes: the
+                # exporter's faithful path uses these to reproduce the original
+                # vertex array layout and per-frame scale/origin exactly
+                # (frames may overlap via first_vert, and each frame has its
+                # own packing box).
+                object["dts_total_vertices"] = mesh_data.num_vertices
+                object["dts_frame_first_verts"] = [f.first_vert for f in frames]
+                _scales = []
+                _origins = []
+                for f in frames:
+                    _sc = getattr(f, 'scale', None) or getattr(mesh_data, 'scale_v2', None)
+                    _og = getattr(f, 'origin', None) or getattr(mesh_data, 'origin_v2', None)
+                    if _sc and _og:
+                        _scales.extend([_sc.x, _sc.y, _sc.z])
+                        _origins.extend([_og.x, _og.y, _og.z])
+                if len(_scales) == 3 * len(frames):
+                    object["dts_frame_scales"] = _scales
+                    object["dts_frame_origins"] = _origins
                 
                 actual_object_name = object.name # Blender may append a .00x
                 bpy.data.collections[filename].objects.link(object)
@@ -741,6 +757,29 @@ class ImportDTS(bpy.types.Operator, ImportHelper):
                 
                 # Create the mesh of the object
                 mesh.from_pydata(array_verts_all, [], array_faces)
+
+                # Vertex-morph (frame track) animation: import frames 1..N-1 as
+                # shape keys so morph animation survives editing and re-export
+                # (e.g. the Sensor Jammer, and morph-animated custom weapons).
+                # The exporter emits key_blocks[1:] as CelAnimMesh frames in
+                # order, so key order here must match frame order.
+                if mesh_data.num_frames > 1 and mesh_data.num_vertices_per_frame > 0:
+                    object.shape_key_add(name='Basis', from_mix=False)
+                    for f_idx in range(1, mesh_data.num_frames):
+                        fr = frames[f_idx]
+                        f_sc = getattr(fr, 'scale', None) or getattr(mesh_data, 'scale_v2', None)
+                        f_og = getattr(fr, 'origin', None) or getattr(mesh_data, 'origin_v2', None)
+                        key = object.shape_key_add(name='frame_{:03d}'.format(f_idx), from_mix=False)
+                        if not (f_sc and f_og):
+                            continue
+                        f_start = fr.first_vert
+                        for vrt_idx in range(mesh_data.num_vertices_per_frame):
+                            vert = mesh_data.vertices[f_start + vrt_idx]
+                            key.data[vrt_idx].co = (
+                                (vert.x * f_sc.x + f_og.x) * self.import_scale,
+                                (vert.y * f_sc.y + f_og.y) * self.import_scale,
+                                (vert.z * f_sc.z + f_og.z) * self.import_scale)
+                    print(f"  Imported {mesh_data.num_frames - 1} morph frame(s) as shape keys for '{obj_name}'")
 
                 animate_meshes(mesh_data, obj, names, keyframes, shape_data.sequences, subsequences, bpy.data.scenes['Scene'])
                 # Select object by name

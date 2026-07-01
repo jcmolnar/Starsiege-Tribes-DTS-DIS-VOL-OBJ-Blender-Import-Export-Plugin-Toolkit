@@ -34,6 +34,10 @@ Developed against Blender 3.0+ (current work is on 5.0).
 - Static, animated, collision, debris, and hulk meshes
 - Levels of Detail (LODs)
 - Node/sequence animations (imported as empties + timeline markers)
+- **Vertex-morph (frame track) animation** — morph frames import as shape keys
+  (decoded with each frame's own scale/origin) with their playback keyframed on
+  the timeline; survives edit + re-export (Sensor Jammer, bows, monsters,
+  vehicle flames)
 - Textures (auto-applied when image files sit next to the `.dts`)
 - IFL sequences (animated materials)
 - Armors with bones, and vehicles
@@ -102,8 +106,6 @@ Useful docs:
   Kronos RPG. A fully general *fresh* (donor-less) weapon exporter is still open.
 - **Textures:** weapon/shield skins are 8-bit MS-BMP indexed to a world multipalette
   (`bfReserved2` = paletteIndex); the orb accessory shape needs native **PBMP**.
-- Sub-animations (e.g. vehicle flames) and some vertex animations (Sensor
-  Jammer) are not fully supported.
 - Animated UVs are not supported.
 - Import one model per scene — importing several at once can break the hierarchy
   and overlap timeline markers.
