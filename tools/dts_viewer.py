@@ -1,4 +1,4 @@
-"""DTS visual verification viewer.
+r"""DTS visual verification viewer.
 
 Renders one or more Tribes .DTS files in a self-contained HTML page (three.js)
 so round-trips can be verified visually WITHOUT copying files into the game and
