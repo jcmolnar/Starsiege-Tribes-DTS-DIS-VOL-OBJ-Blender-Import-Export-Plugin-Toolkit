@@ -16,6 +16,22 @@ Usage:
     python tools/dts_viewer.py model.dts [more.dts ...] -o viewer.html
     python tools/dts_viewer.py original.dts roundtrip.dts   # side-by-side
 
+Mounting (engine-accurate attachment, from the Darkstar source):
+    --equip weapon.dts    attach to model 0's "dummy hand" node -- exactly how
+                          Player::getImageTransform mounts a PrimaryMount
+                          ItemImage (mountPoint 0, zero offset like KoK weapons)
+    --pilot player.dts    attach to model 0's "dummy pilot" node -- exactly how
+                          Vehicle::getObjectMountTransform seats the pilot
+                          (mountPoint 1)
+    --attach file.dts:nodePrefix[:ox,oy,oz[:rx,ry,rz]]
+                          generic: attach to any node of model 0 (prefix match,
+                          e.g. "dummy passenger1", "dummy exit"), with optional
+                          mountOffset / mountRotation (radians) like
+                          ItemImageData
+
+    python tools/dts_viewer.py rpgmalehuman.dts --equip Axe.dts
+    python tools/dts_viewer.py dragon_flyer.DTS --pilot rpgmalehuman.dts
+
 Output defaults to dts_viewer.html next to the first input.
 """
 import argparse
@@ -272,12 +288,17 @@ function dtsQuat(q){ return new THREE.Quaternion(q[0], q[1], q[2], -q[3]); }
 
 const loader = new THREE.TextureLoader();
 const builds = [];      // per model runtime data
+const FREE = MODELS.filter(m => !m.attach);   // side-by-side (non-mounted) models
 let spacing = 0;
-MODELS.forEach(m => spacing = Math.max(spacing, m.radius*2.2 || 2));
+FREE.forEach(m => spacing = Math.max(spacing, m.radius*2.2 || 2));
+let freeIdx = 0;
 
 MODELS.forEach((M, mi) => {
   const root = new THREE.Group();
-  root.position.x = (mi - (MODELS.length-1)/2) * spacing;
+  if (!M.attach){
+    root.position.x = (freeIdx - (FREE.length-1)/2) * spacing;
+    freeIdx++;
+  }
   scene.add(root);
 
   // materials
@@ -372,6 +393,44 @@ function applyTransform(g, tf){
   g.position.set(tf.t[0], tf.t[1], tf.t[2]);
   g.quaternion.copy(dtsQuat(tf.q));
 }
+
+// ---------- engine-accurate mounting ----------
+// Weapon equip: Player::getImageTransform -> off(mountRotation, mountOffset) @
+// player node "dummy hand" (PrimaryMount). Vehicle rider:
+// Vehicle::getObjectMountTransform -> vehicle node "dummy pilot" (mountPoint 1).
+// Node lookup mirrors getNodeAtCurrentDetail: names carry LOD suffixes
+// ("dummy hand36"), so match by prefix preferring the detail-0 subtree.
+function findMountNode(build, prefix){
+  const p = prefix.toLowerCase();
+  let exact = -1, inDetail0 = -1, first = -1;
+  build.M.nodes.forEach((n, i) => {
+    const nm = n.name.toLowerCase();
+    if (nm === p && exact < 0) exact = i;
+    if (nm.startsWith(p)){
+      if (first < 0) first = i;
+      if (inDetail0 < 0 && build.subtree.length && build.subtree[0].has(i)) inDetail0 = i;
+    }
+  });
+  const idx = exact >= 0 ? exact : (inDetail0 >= 0 ? inDetail0 : first);
+  return idx >= 0 ? build.nodeObjs[idx] : null;
+}
+
+MODELS.forEach((M, mi) => {
+  if (!M.attach) return;
+  const child = builds[mi];
+  const parent = builds[M.attach.parent];
+  const nodeObj = parent ? findMountNode(parent, M.attach.node) : null;
+  if (!nodeObj){
+    console.warn('mount node not found: ' + M.attach.node + ' -- leaving model at origin');
+    return;
+  }
+  scene.remove(child.root);
+  nodeObj.add(child.root);
+  const a = M.attach;
+  child.root.position.set(a.offset[0], a.offset[1], a.offset[2]);
+  child.root.rotation.set(a.rot[0], a.rot[1], a.rot[2]);
+  console.log('mounted "' + M.label + '" on node "' + nodeObj.name + '"');
+});
 
 // ---------- LOD ----------
 const lodSel = document.getElementById('lodSel');
@@ -469,15 +528,16 @@ document.getElementById('spinBtn').onclick = function(){
 // ---------- labels ----------
 const labels = document.getElementById('labels');
 MODELS.forEach(m => {
-  const s = document.createElement('span'); s.className = 'mlabel'; s.textContent = m.label;
+  const s = document.createElement('span'); s.className = 'mlabel';
+  s.textContent = m.label + (m.attach ? ' (mounted: ' + m.attach.node + ')' : '');
   labels.appendChild(s);
 });
 
 // ---------- camera fit ----------
 {
   let r = 1;
-  MODELS.forEach(m => r = Math.max(r, m.radius || 1));
-  const span = spacing * Math.max(1, MODELS.length-1) / 2 + r;
+  FREE.forEach(m => r = Math.max(r, m.radius || 1));
+  const span = spacing * Math.max(1, FREE.length-1) / 2 + r;
   camera.position.set(span*0.8, -span*2.0, r*0.9);
   controls.target.set(0, 0, r*0.4);
 }
@@ -511,13 +571,38 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('inputs', nargs='+', help='.dts files to view')
     ap.add_argument('-o', '--output', default=None, help='output HTML path')
+    ap.add_argument('--equip', action='append', default=[],
+                    help='.dts to mount on model 0\'s "dummy hand" (weapon equip)')
+    ap.add_argument('--pilot', action='append', default=[],
+                    help='.dts to mount on model 0\'s "dummy pilot" (vehicle rider)')
+    ap.add_argument('--attach', action='append', default=[],
+                    help='file.dts:nodePrefix[:ox,oy,oz[:rx,ry,rz]]')
     args = ap.parse_args()
 
+    # (path, attach-spec or None); attach = {parent, node, offset, rot}
+    jobs = [(p, None) for p in args.inputs]
+    for p in args.equip:
+        jobs.append((p, {'parent': 0, 'node': 'dummy hand',
+                         'offset': [0, 0, 0], 'rot': [0, 0, 0]}))
+    for p in args.pilot:
+        jobs.append((p, {'parent': 0, 'node': 'dummy pilot',
+                         'offset': [0, 0, 0], 'rot': [0, 0, 0]}))
+    for spec in args.attach:
+        parts = spec.split(':')
+        path, node = parts[0], parts[1]
+        offset = [float(x) for x in parts[2].split(',')] if len(parts) > 2 else [0, 0, 0]
+        rot = [float(x) for x in parts[3].split(',')] if len(parts) > 3 else [0, 0, 0]
+        jobs.append((path, {'parent': 0, 'node': node,
+                            'offset': offset, 'rot': rot}))
+
     models = []
-    for p in args.inputs:
+    for p, attach in jobs:
         print(f"parsing {p} ...")
         models.append(extract_model(p))
         m = models[-1]
+        if attach:
+            m['attach'] = attach
+            print(f"  -> mounted on model 0 node '{attach['node']}'")
         print(f"  {len(m['objects'])} visible meshes, {len(m['nodes'])} nodes, "
               f"{len(m['sequences'])} sequences, {len(m['materials'])} materials "
               f"({sum(1 for x in m['materials'] if x['uri'])} textured)")
