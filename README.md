@@ -67,10 +67,20 @@ A headless workflow for getting new character animations into the game:
 - **`render_preview.py`** — quick Workbench renders of a DTS for visual QA.
 - **`dts_viewer.py`** — visual verification WITHOUT the game: parses one or
   more `.dts` files directly (no Blender) and emits a self-contained HTML
-  viewer (three.js) — models side by side (original vs round-trip), embedded
-  textures, orbit camera, sequence playback (node tracks + vertex-morph frame
-  tracks), LOD selection, wireframe/two-sided toggles.
-  `python tools/dts_viewer.py original.dts roundtrip.dts -o viewer.html`
+  viewer (three.js) — models side by side (original vs round-trip), orbit
+  camera, sequence playback (node tracks + vertex-morph frame tracks), LOD
+  selection, wireframe/two-sided toggles.
+  - **Game-accurate textures**: `--voldir <game>\base` pulls skins from `.vol`
+    archives (recursive), decoding Darkstar PBMP bitmaps via the world `.ppl`
+    multipalette; engine material flags render faithfully (translucent,
+    cutout, fullbright flames, palette-index-0 transparency).
+  - **Engine-accurate mounting**: `--equip weapon.dts` (player "dummy hand"),
+    `--pilot player.dts` (vehicle "dummy pilot" + driverPose lean), generic
+    `--attach`.
+  - `python tools/dts_viewer.py flyer.dts --pilot player.dts --voldir "C:\game\base"`
+- **`patch_node.py`** — move/rotate a node's default transform directly in the
+  DTS binary (mount-point fixes that a Blender round-trip can't persist,
+  because the hybrid splice preserves the original header).
 
 See [`tools/README.md`](tools/README.md) for exact command lines.
 
