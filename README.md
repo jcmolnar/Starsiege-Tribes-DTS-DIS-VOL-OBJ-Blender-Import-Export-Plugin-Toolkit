@@ -65,6 +65,12 @@ A headless workflow for getting new character animations into the game:
   duration options (`keep` preserves the original timing to avoid foot-sliding on
   speed-synced locomotion).
 - **`render_preview.py`** — quick Workbench renders of a DTS for visual QA.
+- **`dts_viewer.py`** — visual verification WITHOUT the game: parses one or
+  more `.dts` files directly (no Blender) and emits a self-contained HTML
+  viewer (three.js) — models side by side (original vs round-trip), embedded
+  textures, orbit camera, sequence playback (node tracks + vertex-morph frame
+  tracks), LOD selection, wireframe/two-sided toggles.
+  `python tools/dts_viewer.py original.dts roundtrip.dts -o viewer.html`
 
 See [`tools/README.md`](tools/README.md) for exact command lines.
 
