@@ -32,6 +32,15 @@ Mounting (engine-accurate attachment, from the Darkstar source):
     python tools/dts_viewer.py rpgmalehuman.dts --equip Axe.dts
     python tools/dts_viewer.py dragon_flyer.DTS --pilot rpgmalehuman.dts
 
+Game-accurate textures: pass --voldir <game>\base (recursive) and textures
+are pulled from .vol archives, including Darkstar PBMP bitmaps colored via
+the world .ppl multipalette (auto-discovered; override with --ppl). Material
+flags render like the engine: 0x1000 transparent cutout, 0x2000 translucent,
+ShadingNone fullbright (flames/glows), with palette index 0 transparent.
+
+    python tools/dts_viewer.py newflyer.DTS --pilot player.dts \
+        --voldir "C:\Dynamix\Tribes\base"
+
 Output defaults to dts_viewer.html next to the first input.
 """
 import argparse
@@ -65,12 +74,142 @@ def _get(s, *names):
     return []
 
 
-def _texture_data_uri(map_file, search_dirs):
-    """Find map_file (or .png/.bmp sibling) and return a PNG data URI."""
+def read_vol_index(volpath):
+    """Index a Darkstar .vol archive: {filename.lower(): (offset, size)}.
+
+    Format (engine Core/volstrm.cpp): 'PVOL' magic, u32 pointer to the trailer
+    blocks; trailer = 'vols' block (null-terminated name strings) followed by
+    'voli' block of packed 17-byte items (id u32, name-offset u32, blockOffset
+    u32, size u32, compressType u8). File bytes live at blockOffset + 8
+    (skipping the 'VBLK' sub-block header).
+    """
+    import struct
+    index = {}
+    with open(volpath, 'rb') as f:
+        data = f.read()
+    if data[:4] not in (b'PVOL', b'VOL '):
+        return index
+    (trailer_off,) = struct.unpack_from('<I', data, 4)
+    p = trailer_off
+    strings = b''
+    items = b''
+    while p + 8 <= len(data):
+        tag = data[p:p + 4]
+        (size,) = struct.unpack_from('<I', data, p + 4)
+        size &= 0x00FFFFFF
+        body = data[p + 8:p + 8 + size]
+        if tag == b'vols':
+            strings = body
+        elif tag == b'voli':
+            items = body
+            break
+        p += 8 + size + (size & 1)
+    for off in range(0, len(items) - 16, 17):
+        _id, s_off, blk_off, fsize, ctype = struct.unpack_from('<IIIIB', items, off)
+        if s_off >= len(strings):
+            continue
+        name = strings[s_off:strings.find(b'\x00', s_off)].decode('ascii', 'ignore')
+        if not name:
+            continue
+        if ctype != 0:
+            continue  # compressed entries unsupported; engine uses 0 for skins
+        index[name.lower()] = (blk_off + 8, fsize)
+    return index
+
+
+def parse_ppl(data):
+    """Parse a PL98 multipalette (.ppl): {paletteIndex: [(r,g,b)]*256}.
+
+    Also keyed by None for the first table (fallback). Stock PBMP textures
+    carry only a PiDX palette index; the colors live in the world palette.
+    """
+    import struct
+    if data[:4] != b'PL98':
+        raise ValueError('not a PL98 palette')
+    (num_pal,) = struct.unpack_from('<i', data, 4)
+    off = 4 + 16 + 32   # magic + header ints + allowedColorMatches bitvector
+    tables = {}
+    for _ in range(num_pal):
+        colors = [tuple(data[off + c * 4: off + c * 4 + 3]) for c in range(256)]
+        off += 1024
+        (pidx, _ptype) = struct.unpack_from('<ii', data, off)
+        off += 8
+        tables[pidx] = colors
+        tables.setdefault(None, colors)
+    return tables
+
+
+def parse_pbmp(data):
+    """Parse a Darkstar PBMP (GFXBitmap): (width, height, level-0 index
+    bytes, paletteIndex, embedded_palette or None). Chunked format from
+    engine Dgfx/g_bitmap.cpp: head / data / DETL / PiDX / RIFF."""
+    import struct
+    off = 0
+    width = height = 0
+    indices = None
+    palette_index = None
+    embedded = None
+    while off + 8 <= len(data):
+        cid = data[off:off + 4]
+        (csize,) = struct.unpack_from('<I', data, off + 4)
+        off += 8
+        if cid == b'PBMP':
+            continue                       # outer wrapper; size covers rest
+        if cid == b'head':
+            _ver, width, height, _depth, _attr = struct.unpack_from('<5I', data, off)
+        elif cid == b'data':
+            indices = data[off:off + csize]
+        elif cid == b'RIFF':
+            # embedded MS palette: skip 20-byte RIFF/PAL header to entries
+            pal = data[off + 20:off + 20 + 1024]
+            embedded = [tuple(pal[c * 4:c * 4 + 3]) for c in range(256)]
+        elif cid == b'PiDX':
+            (palette_index,) = struct.unpack_from('<I', data, off)
+        off += csize
+    if not (width and height and indices):
+        raise ValueError('incomplete PBMP')
+    return width, height, indices[:width * height], palette_index, embedded
+
+
+def _texture_data_uri(map_file, search_dirs, vols=None, translucent=False,
+                      ppl_tables=None):
+    """Find map_file (or .png/.bmp sibling) and return a PNG data URI.
+
+    Search order: loose files next to the .dts / --texdir folders, then .vol
+    archives. Handles MS BMP / PNG (via Pillow) AND raw Darkstar PBMP
+    (indexed via the world .ppl multipalette). For translucent/transparent
+    materials, palette index 0 becomes transparent (engine convention).
+    """
     try:
         from PIL import Image
     except ImportError:
         return None
+
+    def encode(img):
+        if translucent and img.mode == 'P':
+            # palette index 0 = transparent (engine translucent convention)
+            idx = img.point(lambda v: 255 if v else 0, mode='L')
+            img = img.convert('RGBA')
+            img.putalpha(idx)
+        else:
+            img = img.convert('RGB')
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        return 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode('ascii')
+
+    def raw_to_uri(raw):
+        if raw[:4] == b'PBMP':
+            w, h, idx, pidx, embedded = parse_pbmp(raw)
+            pal = embedded
+            if pal is None and ppl_tables:
+                pal = ppl_tables.get(pidx) or ppl_tables.get(None)
+            if pal is None:
+                pal = [(v, v, v) for v in range(256)]   # grayscale fallback
+            img = Image.frombytes('P', (w, h), idx)
+            img.putpalette([c for rgb in pal for c in rgb])
+            return encode(img)
+        return encode(Image.open(io.BytesIO(raw)))
+
     base = os.path.splitext(map_file)[0]
     candidates = []
     for d in search_dirs:
@@ -80,17 +219,28 @@ def _texture_data_uri(map_file, search_dirs):
     for path in candidates:
         if os.path.isfile(path):
             try:
-                img = Image.open(path).convert('RGB')
-                buf = io.BytesIO()
-                img.save(buf, format='PNG')
-                b64 = base64.b64encode(buf.getvalue()).decode('ascii')
-                return 'data:image/png;base64,' + b64
+                with open(path, 'rb') as f:
+                    return raw_to_uri(f.read())
             except Exception:
                 continue
+
+    # fall back to vol archives
+    for want in (map_file.lower(), base.lower() + '.bmp', base.lower() + '.png'):
+        for volpath, index in (vols or {}).items():
+            hit = index.get(want)
+            if hit:
+                off, size = hit
+                with open(volpath, 'rb') as f:
+                    f.seek(off)
+                    raw = f.read(size)
+                try:
+                    return raw_to_uri(raw)
+                except Exception:
+                    continue
     return None
 
 
-def extract_model(path, texdirs=None):
+def extract_model(path, texdirs=None, vols=None, ppl_tables=None):
     d = Dts.from_file(path)
     s = d.shape.data.obj_data
     names = [_name(n) for n in s.names]
@@ -143,11 +293,19 @@ def extract_model(path, texdirs=None):
     if getattr(d, 'materials', None):
         for p in d.materials.params:
             mf = _name(getattr(p, 'map_file', '') or '')
-            uri = _texture_data_uri(mf, search_dirs) if mf else None
+            flags = getattr(p, 'flags', 0)
+            # ts_material.h TextureType: 0x1000 Transparent (cutout),
+            # 0x2000 Translucent (blend); palette index 0 renders
+            # transparent in-engine for both
+            translucent = bool(flags & 0x3000)
+            uri = (_texture_data_uri(mf, search_dirs, vols=vols,
+                                     translucent=translucent,
+                                     ppl_tables=ppl_tables)
+                   if mf else None)
             rgb = getattr(p, 'rgb', None)
             color = [rgb.red, rgb.green, rgb.blue] if rgb else [200, 200, 200]
             mats.append({'map': mf, 'uri': uri, 'color': color,
-                         'flags': getattr(p, 'flags', 0)})
+                         'flags': flags})
 
     # objects + meshes
     objs = []
@@ -308,6 +466,18 @@ MODELS.forEach((M, mi) => {
     const mat = new THREE.MeshLambertMaterial(opts);
     if (mm.uri) { const t = loader.load(mm.uri); t.wrapS = t.wrapT = THREE.RepeatWrapping;
                   mat.map = t; mat.color.set(0xffffff); }
+    // Engine material flags (ts_material.h): type nibble 0x0f (0x3 =
+    // textured); ShadingType 0xf00 (0x100 = ShadingNone = fullbright);
+    // TextureType 0xf000 (0x1000 = Transparent cutout, 0x2000 = Translucent
+    // blend). Palette index 0 was made transparent at texture-decode time.
+    const fl = mm.flags || 0;
+    if (fl & 0x2000){ mat.transparent = true; mat.depthWrite = false; }
+    else if (fl & 0x1000){ mat.alphaTest = 0.5; }
+    if ((fl & 0xf00) === 0x100){        // fullbright (flames, glows)
+      mat.emissive = new THREE.Color(0xffffff);
+      if (mat.map) mat.emissiveMap = mat.map;
+      else mat.emissive.copy(mat.color);
+    }
     return mat;
   });
   const fallbackMat = new THREE.MeshLambertMaterial({color:0x8a93a5, side:THREE.FrontSide});
@@ -594,7 +764,65 @@ def main():
     ap.add_argument('--texdir', action='append', default=[],
                     help='extra folder(s) to search for textures (repeatable); '
                          'e.g. a game skins dir for shapes whose BMPs live in .vol archives')
+    ap.add_argument('--vol', action='append', default=[],
+                    help='.vol archive(s) to search for textures (repeatable)')
+    ap.add_argument('--voldir', action='append', default=[],
+                    help='folder(s) whose *.vol archives are all searched '
+                         '(e.g. C:\\Dynamix\\Tribes\\base)')
+    ap.add_argument('--ppl', default=None,
+                    help='world palette: a .ppl file path, or a name to find '
+                         'in the vols (default: auto, prefers lush.day.ppl)')
     args = ap.parse_args()
+
+    vol_paths = list(args.vol)
+    for d_ in args.voldir:
+        try:
+            for root, _dirs, files in os.walk(d_):
+                vol_paths.extend(
+                    os.path.join(root, fn) for fn in sorted(files)
+                    if fn.lower().endswith('.vol'))
+        except OSError as e:
+            print(f"WARNING: cannot scan voldir {d_}: {e}")
+    vols = {}
+    for vp in vol_paths:
+        try:
+            idx = read_vol_index(vp)
+            if idx:
+                vols[vp] = idx
+        except Exception as e:
+            print(f"WARNING: failed to index {vp}: {e}")
+    if vols:
+        total = sum(len(v) for v in vols.values())
+        print(f"indexed {len(vols)} vol archive(s), {total} files")
+
+    # World multipalette: PBMP textures carry only a palette index; the
+    # colors live in a .ppl. Use --ppl, else auto-discover one in the vols
+    # (prefer the lush day palette, the KoK world's).
+    ppl_tables = None
+    ppl_src = args.ppl
+    if ppl_src and os.path.isfile(ppl_src):
+        with open(ppl_src, 'rb') as f:
+            ppl_tables = parse_ppl(f.read())
+        print(f"palette: {ppl_src} ({len(ppl_tables) - 1} tables)")
+    else:
+        want = (ppl_src or '').lower() or None
+        best = None
+        for volpath, index in vols.items():
+            for name, (off, size) in index.items():
+                if not name.endswith('.ppl'):
+                    continue
+                if want and name != want:
+                    continue
+                rank = 0 if 'lush.day' in name else 1
+                if best is None or rank < best[0]:
+                    best = (rank, volpath, name, off, size)
+        if best:
+            _, volpath, name, off, size = best
+            with open(volpath, 'rb') as f:
+                f.seek(off)
+                ppl_tables = parse_ppl(f.read(size))
+            print(f"palette: {name} from {os.path.basename(volpath)} "
+                  f"({len(ppl_tables) - 1} tables)")
 
     # (path, attach-spec or None); attach = {parent, node, offset, rot}
     jobs = [(p, None) for p in args.inputs]
@@ -616,7 +844,8 @@ def main():
     models = []
     for p, attach in jobs:
         print(f"parsing {p} ...")
-        models.append(extract_model(p, texdirs=args.texdir))
+        models.append(extract_model(p, texdirs=args.texdir, vols=vols,
+                                    ppl_tables=ppl_tables))
         m = models[-1]
         if attach:
             m['attach'] = attach

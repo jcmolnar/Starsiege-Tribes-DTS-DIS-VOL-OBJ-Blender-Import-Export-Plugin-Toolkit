@@ -58,16 +58,20 @@ SHAPE_VERSION = 8   # TS::Shape version
 MESH_VERSION = 3    # TS::CelAnimMesh version  
 MATERIAL_VERSION = 4  # TS::MaterialList version
 
-# Material effect flags (from dts.py source)
-# These affect how the material is rendered in-game
-MAT_FLAG_SWRAP = 0x1        # S texture wrapping
-MAT_FLAG_TWRAP = 0x2        # T texture wrapping  
-MAT_FLAG_TRANSLUCENT = 0x4  # Translucent (alpha blending)
-MAT_FLAG_ADDITIVE = 0x8     # Additive blending (GLOW effect!)
-MAT_FLAG_SUBTRACTIVE = 0x10 # Subtractive blending
-MAT_FLAG_SELFILLUM = 0x20   # Self-illumination (ignores lighting, always bright)
-MAT_FLAG_NOENVMAP = 0x40    # Never apply environment mapping
-MAT_FLAG_NOMIPMAP = 0x80    # No mip-mapping
+# Material flags -- CORRECTED to the engine's actual layout (ts_material.h).
+# fFlags packs three FIELDS, not a bitmask of effects:
+#   type nibble  0x000f: 0=null 1=palette 2=RGB 3=TEXTURE
+#   shading      0x0f00: 0x100=none (fullbright) 0x200=flat 0x400=smooth
+#   texture      0xf000: 0x1000=transparent (cutout) 0x2000=translucent (blend)
+# (The previous constants here -- 0x4 "translucent", 0x8 "additive", SWRAP/
+# TWRAP etc. -- came from a different engine generation and set meaningless
+# bits in Tribes/Darkstar; there is no additive-blend material flag at all.)
+MAT_TYPE_TEXTURE = 0x3
+MAT_SHADING_MASK = 0xf00
+MAT_SHADING_NONE = 0x100      # fullbright: flames, glows, self-illuminated
+MAT_SHADING_SMOOTH = 0x400
+MAT_TEX_TRANSPARENT = 0x1000  # palette index 0 = cutout
+MAT_TEX_TRANSLUCENT = 0x2000  # alpha blended (index 0 transparent)
 
 # Keyframe type flags (from mat_index field)
 FLAG_FRAME_TRACK = 0x1000      # Frame track animation (shape keys/vertex morphing)
@@ -1977,26 +1981,28 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                     mat_name = mat.name
                     mat_name_upper = mat_name.upper()
                     
-                    # Base flags: Textured + Smooth shading
-                    mat_flags = 0x403
+                    # Base flags: Textured + Smooth shading (stock 0x403)
+                    mat_flags = MAT_TYPE_TEXTURE | MAT_SHADING_SMOOTH
                     mat_alpha = 1.0
-                    
-                    # Detect special material effects from name suffixes
-                    # Use _GLOW or _ADDITIVE for additive blending (glowing effect)
-                    if '_GLOW' in mat_name_upper or '_ADDITIVE' in mat_name_upper:
-                        mat_flags |= MAT_FLAG_ADDITIVE
-                        print(f"  Material '{mat_name}': Additive/Glow enabled")
-                    
-                    # Use _SELFILLUM for self-illumination (ignores shadows, always bright)
-                    if '_SELFILLUM' in mat_name_upper or '_LIT' in mat_name_upper:
-                        mat_flags |= MAT_FLAG_SELFILLUM
-                        print(f"  Material '{mat_name}': Self-illumination enabled")
-                    
-                    # Use _TRANSLUCENT or _ALPHA for translucent blending
+
+                    # Detect special material effects from name suffixes,
+                    # mapped onto the engine's REAL flag fields:
+                    # _GLOW/_SELFILLUM/_LIT -> ShadingNone (fullbright; how
+                    # stock flames render -- there is no additive blending)
+                    if ('_GLOW' in mat_name_upper or '_ADDITIVE' in mat_name_upper
+                            or '_SELFILLUM' in mat_name_upper or '_LIT' in mat_name_upper):
+                        mat_flags = (mat_flags & ~MAT_SHADING_MASK) | MAT_SHADING_NONE
+                        print(f"  Material '{mat_name}': fullbright (ShadingNone) enabled")
+
+                    # _TRANSLUCENT/_ALPHA -> alpha blend; _TRANSPARENT/_CUTOUT
+                    # -> palette-index-0 cutout
                     if '_TRANSLUCENT' in mat_name_upper or '_ALPHA' in mat_name_upper:
-                        mat_flags |= MAT_FLAG_TRANSLUCENT
+                        mat_flags |= MAT_TEX_TRANSLUCENT
                         mat_alpha = 0.5  # Default 50% alpha
                         print(f"  Material '{mat_name}': Translucent enabled")
+                    elif '_TRANSPARENT' in mat_name_upper or '_CUTOUT' in mat_name_upper:
+                        mat_flags |= MAT_TEX_TRANSPARENT
+                        print(f"  Material '{mat_name}': Transparent cutout enabled")
                     
                     materials_set[mat.name] = {
                         'flags': mat_flags,
