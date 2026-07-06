@@ -105,8 +105,9 @@ format family from DTS, shipped inside PVOL `.vol` archives (`.dis` manifest,
 The addon imports and exports them too:
 
 - **File → Import → Tribes Interior (.vol/.dis/.dig)** — pick a `.vol` (every
-  interior inside is imported, highest LOD by default), a loose `.dis`, or a
-  single `.dig`. Textures + PL98 world palettes resolve automatically from the
+  interior inside is imported, highest LOD by default, each matched to its
+  own `.dml` material list — multi-shape archives like `rpgshapes.vol` work),
+  a loose `.dis`, or a single `.dig`. Textures + PL98 world palettes resolve automatically from the
   game's vols (the engine's per-surface texture sub-rectangle mapping is
   reproduced, so atlas panels aren't stretched). Rotated mod interiors
   (Kronos/RPG buildings) store U mirrored — tick **Mirror U** if textures look
