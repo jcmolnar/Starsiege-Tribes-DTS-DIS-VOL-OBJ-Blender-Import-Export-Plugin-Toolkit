@@ -600,8 +600,10 @@ class ImportDIS(bpy.types.Operator, ImportHelper):
             vol_dir = find_tribes_root(os.path.dirname(path))
             if vol_dir is None:
                 self.report({'WARNING'},
-                            'Tribes install not found above the file; importing untextured')
+                            'No Tribes vols found above the file; using only '
+                            'loose textures next to it')
 
+        src_dir = os.path.dirname(os.path.abspath(path))
         count = 0
         for label, dig_bytes, dml_bytes in jobs:
             try:
@@ -610,7 +612,7 @@ class ImportDIS(bpy.types.Operator, ImportHelper):
                 self.report({'WARNING'}, '{}: {}'.format(label, e))
                 continue
             materials = material_names_from_bytes(dml_bytes) if dml_bytes else None
-            self._build_mesh(context, label, geo, materials, vol_dir)
+            self._build_mesh(context, label, geo, materials, vol_dir, src_dir)
             count += 1
 
         if count == 0:
@@ -618,26 +620,54 @@ class ImportDIS(bpy.types.Operator, ImportHelper):
         self.report({'INFO'}, 'Imported {} interior mesh(es)'.format(count))
         return {'FINISHED'}
 
-    def _build_mesh(self, context, label, geo, materials, vol_dir):
+    def _build_mesh(self, context, label, geo, materials, vol_dir, src_dir=None):
         verts = geo['point3']
         pt2 = geo['point2']
         vlist = geo['vertices']
 
-        # resolve textures first: per-surface UVs need each bitmap's dimensions
+        # resolve textures first: per-surface UVs need each bitmap's dimensions.
+        # LOOSE files next to the imported file win (fully-extracted installs
+        # ship correct loose .png/.bmp and may have no vols at all); the game's
+        # vol archives are only scanned for what isn't found locally.
         images, tex_dims = {}, {}
-        if vol_dir and materials:
-            bmp_index = build_bmp_index(vol_dir)
-            palettes = load_palettes(vol_dir)
+        loose = {}
+        if src_dir and materials:
+            for fn in os.listdir(src_dir):
+                fl = fn.lower()
+                if fl.endswith(('.png', '.bmp')):
+                    loose.setdefault(fl, os.path.join(src_dir, fn))
+        bmp_index = palettes = None  # lazy: scanning vols can be slow
+        if self.load_textures and materials:
             for idx, name in enumerate(materials):
                 if not name:
                     continue
-                v = bmp_index.get(name.lower())
-                if v is None:
+                stem = os.path.splitext(name)[0].lower()
+                lp = loose.get(stem + '.png')
+                if lp:
+                    img = bpy.data.images.load(lp)
+                    img.pack()
+                    images[idx] = img
+                    tex_dims[idx] = (img.size[0], img.size[1])
+                    continue
+                data = None
+                lb = loose.get(stem + '.bmp')
+                if lb:
+                    with open(lb, 'rb') as f:
+                        data = f.read()
+                elif vol_dir:
+                    if bmp_index is None:
+                        bmp_index = build_bmp_index(vol_dir)
+                    v = bmp_index.get(name.lower())
+                    if v is not None:
+                        data = v.read(name)
+                if data is None:
                     continue
                 try:
-                    bmp = parse_bitmap(v.read(name))
+                    bmp = parse_bitmap(data)
                 except Exception:
                     continue
+                if palettes is None:
+                    palettes = load_palettes(vol_dir) if vol_dir else {}
                 # engine renders via the WORLD multipalette by paletteIndex; an
                 # embedded palette may be a grayscale placeholder (RPG mods)
                 pal = None
