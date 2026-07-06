@@ -539,8 +539,11 @@ class ImportDIS(bpy.types.Operator, ImportHelper):
                 if not digs:
                     self.report({'ERROR'}, 'No interior .dig geometry inside this .vol')
                     return {'CANCELLED'}
-                dmls = [n for n in v.names() if n.lower().endswith('.dml')]
-                dml_bytes = v.read(dmls[0]) if dmls else None
+                # multi-shape vols carry one .dml PER interior (table.dml,
+                # tavern.dml, ...) -- match each dig to ITS material list by
+                # base name, not just the first .dml in the archive
+                dmls = {os.path.splitext(n)[0].lower(): n
+                        for n in v.names() if n.lower().endswith('.dml')}
                 if not self.all_detail_levels:
                     # keep only each interior's lowest -NN suffix (highest LOD)
                     best = {}
@@ -551,6 +554,11 @@ class ImportDIS(bpy.types.Operator, ImportHelper):
                             best[base] = (lvl, d)
                     digs = [d for _, d in best.values()]
                 for d in digs:
+                    base = re.sub(r'-\d+\.dig$', '', d, flags=re.IGNORECASE).lower()
+                    dml_n = dmls.get(base)
+                    if dml_n is None and len(dmls) == 1:
+                        dml_n = next(iter(dmls.values()))
+                    dml_bytes = v.read(dml_n) if dml_n else None
                     jobs.append((os.path.splitext(d)[0], v.read(d), dml_bytes))
             elif ext in ('.dis', '.dig'):
                 d = os.path.dirname(os.path.abspath(path))
