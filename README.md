@@ -23,6 +23,7 @@ Once enabled:
 
 - **File → Import → Tribes DTS (.dts)**
 - **File → Export → Tribes DTS (.dts)**
+- **File → Import / Export → Tribes Interior (.vol/.dis/.dig)**
 
 Developed against Blender 3.0+ (current work is on 5.0).
 
@@ -96,6 +97,30 @@ Developed against Blender 3.0+ (current work is on 5.0).
   right-handed, identical to Blender (verified from engine source) — there was
   never an axis conversion to make, and enabling it tipped models 90°
 
+### Interiors (.dis / .dig / .vol)
+
+Buildings, forts and bases are **interiors** — BSP geometry in a different
+format family from DTS, shipped inside PVOL `.vol` archives (`.dis` manifest,
+`.dig` geometry per detail level, `.dil` lighting, `.dml` material list).
+The addon imports and exports them too:
+
+- **File → Import → Tribes Interior (.vol/.dis/.dig)** — pick a `.vol` (every
+  interior inside is imported, highest LOD by default), a loose `.dis`, or a
+  single `.dig`. Textures + PL98 world palettes resolve automatically from the
+  game's vols (the engine's per-surface texture sub-rectangle mapping is
+  reproduced, so atlas panels aren't stretched). Rotated mod interiors
+  (Kronos/RPG buildings) store U mirrored — tick **Mirror U** if textures look
+  flipped.
+- **File → Export → Tribes Interior (.vol)** — writes the whole family
+  (`.dis` + `.dig` + `.dml` + `.dil`) into a game-ready `.vol`. A real,
+  engine-loadable BSP is compiled by **`objbuild.js`** — the engine's own
+  `ITRBSPBuild::buildTree` + PVS + lighting ported to WASM — via Node.js
+  (set its path in the export options). Collision modes: **Full BSP**,
+  **Box** (full render detail, simple box collision — safe for complex props
+  vs the engine's 400-node collision clip cap), **None** (walk-through
+  decoration), or **Empty BSP** (no Node needed; Blender round-trips only,
+  the game won't render it).
+
 ### Animation pipeline (`tools/`)
 A headless workflow for getting new character animations into the game:
 
@@ -140,7 +165,8 @@ See [`tools/README.md`](tools/README.md) for exact command lines.
 
 | Path | Purpose |
 |------|---------|
-| `main.py`, `export_dts.py` | Import / export operators |
+| `main.py`, `export_dts.py` | DTS import / export operators |
+| `interior_dis.py` | Interior (.dis/.dig/.vol) import / export |
 | `dts.py`, `dts.ksy`, `kaitaistruct.py` | DTS binary parser (Kaitai-based) |
 | `tools/` | Mixamo retarget, animation patcher, render preview |
 | `tests/` | Round-trip regression test |
@@ -194,8 +220,6 @@ Useful docs:
 - Bone-based animation (auto-create bones, actions instead of markers)
 - Material-track keyframe generation on fresh exports (animated-UV timing for
   brand-new models)
-- `DIS` interior import/export inside the addon (working standalone pipeline
-  exists; porting in progress)
 - Support for `TED` (terrain) files
 
 ## Credits

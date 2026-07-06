@@ -38,21 +38,28 @@ bl_info = {
 import bpy
 from .main import ImportDTS
 from .export_dts import ExportDTS
+from .interior_dis import ImportDIS, ExportDIS
 
 def menu_func_import(self, context):
     self.layout.operator(ImportDTS.bl_idname, text="Tribes DTS (.dts)")
+    self.layout.operator(ImportDIS.bl_idname, text="Tribes Interior (.vol/.dis/.dig)")
 
 def menu_func_export(self, context):
     self.layout.operator(ExportDTS.bl_idname, text="Tribes DTS (.dts)")
+    self.layout.operator(ExportDIS.bl_idname, text="Tribes Interior (.vol)")
 
 def register():
     bpy.utils.register_class(ImportDTS)
     bpy.utils.register_class(ExportDTS)
+    bpy.utils.register_class(ImportDIS)
+    bpy.utils.register_class(ExportDIS)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
 
 def unregister():
     bpy.utils.unregister_class(ImportDTS)
     bpy.utils.unregister_class(ExportDTS)
+    bpy.utils.unregister_class(ImportDIS)
+    bpy.utils.unregister_class(ExportDIS)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
