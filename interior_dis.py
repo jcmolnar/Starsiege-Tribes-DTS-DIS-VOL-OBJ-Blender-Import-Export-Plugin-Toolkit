@@ -562,8 +562,18 @@ class ImportDIS(bpy.types.Operator, ImportHelper):
                     jobs.append((os.path.splitext(d)[0], v.read(d), dml_bytes))
             elif ext in ('.dis', '.dig'):
                 d = os.path.dirname(os.path.abspath(path))
-                dig_paths = ([path] if ext == '.dig'
-                             else sorted(glob.glob(os.path.join(d, '*.dig'))))
+                if ext == '.dig':
+                    dig_paths = [path]
+                else:
+                    # only THIS interior's detail levels (<base>-NN.dig), not
+                    # every .dig that happens to sit in the folder
+                    base = os.path.splitext(os.path.basename(path))[0]
+                    dig_paths = sorted(
+                        dp for dp in glob.glob(os.path.join(d, '*.dig'))
+                        if re.fullmatch(re.escape(base) + r'(-\d+)?\.dig',
+                                        os.path.basename(dp), re.IGNORECASE))
+                    if not self.all_detail_levels and len(dig_paths) > 1:
+                        dig_paths = dig_paths[:1]  # lowest -NN = highest LOD
                 if not dig_paths:
                     self.report({'ERROR'}, 'No .dig geometry found next to the .dis')
                     return {'CANCELLED'}
@@ -571,6 +581,10 @@ class ImportDIS(bpy.types.Operator, ImportHelper):
                     stem = os.path.basename(dp)
                     base = re.sub(r'-\d+\.dig$', '', stem, flags=re.IGNORECASE)
                     dml_p = os.path.join(d, base + '.dml')
+                    if not os.path.isfile(dml_p):  # case-insensitive fallback
+                        cands = [c for c in glob.glob(os.path.join(d, '*.dml'))
+                                 if os.path.splitext(os.path.basename(c))[0].lower() == base.lower()]
+                        dml_p = cands[0] if cands else dml_p
                     dml_bytes = open(dml_p, 'rb').read() if os.path.isfile(dml_p) else None
                     jobs.append((os.path.splitext(stem)[0],
                                  open(dp, 'rb').read(), dml_bytes))
