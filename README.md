@@ -56,6 +56,15 @@ Developed against Blender 3.0+ (current work is on 5.0).
   engine's additive blending: luminance-driven alpha + emission (view in
   Material Preview / Rendered shading)
 - IFL sequences (animated materials), keyframed in sync with their sequence
+- **Animated UVs ("texture frames")** — meshes carrying several complete UV
+  sets (e.g. the Plasma Gun's sliding cartridge artwork) import as extra
+  `UVFrame_n` UV layers, with the engine's material-track keyframes driving a
+  keyed `uv_frame` object property that switches the material's UVs (view in
+  Material Preview)
+- **Engine-accurate pose holds** — sequences that don't animate a node hold it
+  at its last pose (stepped across the gap) instead of letting Blender
+  interpolate toward a later clip's keys, which made characters slowly slide
+  back to origin during celebration/idle clips
 - "Organize by LOD" collections use the shape's **actual detail sizes**
   (36/10/2 characters, 15/4/1 deployables, ...); bounds/collision meshes
   import as wireframe so they don't cover the model
@@ -76,6 +85,16 @@ Developed against Blender 3.0+ (current work is on 5.0).
 - Hidden DTS members (e.g. default-hidden muzzle-flash meshes) are pulled back
   into "Selected Only" exports automatically — a select-all can't grab hidden
   objects, which used to silently drop them from round-trips
+- **Animated UVs round-trip** — all `UVFrame_n` UV layers are written back as
+  DTS texture frames (slots de-duplicated consistently across every frame);
+  timing keyframes survive via the header splice
+- **"Use High LOD for All"** works with any detail-size scheme (36/10/2
+  characters, 15/4/1 deployables, ...): each mesh group's highest-detail data
+  is copied onto its lower LODs, so distance never reduces detail — modern
+  GPUs don't need 1998's LOD budget
+- The misleading "Convert Axes (Z→Y)" option was removed: Tribes DTS is Z-up
+  right-handed, identical to Blender (verified from engine source) — there was
+  never an axis conversion to make, and enabling it tipped models 90°
 
 ### Animation pipeline (`tools/`)
 A headless workflow for getting new character animations into the game:
@@ -153,7 +172,9 @@ Useful docs:
   path for adapting modern models, but it is no longer the only one.
 - **Textures:** weapon/shield skins are 8-bit MS-BMP indexed to a world multipalette
   (`bfReserved2` = paletteIndex); the orb accessory shape needs native **PBMP**.
-- Animated UVs are not supported.
+- Animated UVs import and round-trip; fresh (generated-header) exports don't
+  yet emit the material-track timing keyframes, so brand-new UV animation
+  needs a donor/round-trip base for now.
 - Re-importing into a used scene works, but timeline markers from earlier
   imports stick around (they belong to the scene) — one model per scene is
   still the cleanest workflow.
@@ -171,8 +192,11 @@ Useful docs:
 
 ## Wishlist
 - Bone-based animation (auto-create bones, actions instead of markers)
-- Animated UVs
-- Support for `TED` and `DIL` files (a `DIS` exporter exists as a separate project)
+- Material-track keyframe generation on fresh exports (animated-UV timing for
+  brand-new models)
+- `DIS` interior import/export inside the addon (working standalone pipeline
+  exists; porting in progress)
+- Support for `TED` (terrain) files
 
 ## Credits
 Fork of the original *TribesToBlender* import addon, extended with export and the

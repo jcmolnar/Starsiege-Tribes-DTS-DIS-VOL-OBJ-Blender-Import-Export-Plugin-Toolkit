@@ -78,6 +78,58 @@ def _action_fcurves(anim_data):
         return fcs
 
 
+def _setup_uv_frame_material(mat, n_uv_frames):
+    """Wire a material so its texture samples the UV layer selected by the
+    OBJECT's "uv_frame" custom property (DTS animated UVs / texture frames).
+
+    Chain: Attribute("uv_frame") -> per-frame GREATER_THAN gates -> Mix
+    (vector) nodes stepping through UV Map, UVFrame_1, ... into the image
+    texture's Vector input. Objects without the property evaluate to 0 and
+    keep using the base 'UV Map', so sharing the material with static meshes
+    is safe (their missing UVFrame_n layers are never selected)."""
+    if mat is None or not mat.use_nodes:
+        return
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    if nodes.get('UV Frame Select') is not None:
+        return  # already wired (several meshes may share the material)
+    tex = next((n for n in nodes if n.type == 'TEX_IMAGE'), None)
+    if tex is None or tex.inputs['Vector'].is_linked:
+        return  # no plain image texture to drive (e.g. IFL mix chains)
+
+    attr = nodes.new('ShaderNodeAttribute')
+    attr.name = 'UV Frame Select'
+    attr.attribute_type = 'OBJECT'
+    attr.attribute_name = 'uv_frame'
+    attr.location = (tex.location.x - 700, tex.location.y - 200)
+
+    base_uv = nodes.new('ShaderNodeUVMap')
+    base_uv.uv_map = 'UV Map'
+    base_uv.location = (tex.location.x - 700, tex.location.y)
+    current = base_uv.outputs['UV']
+    for uf in range(1, n_uv_frames):
+        uv_node = nodes.new('ShaderNodeUVMap')
+        uv_node.uv_map = 'UVFrame_{}'.format(uf)
+        uv_node.location = (tex.location.x - 700, tex.location.y + 150 * uf)
+
+        gate = nodes.new('ShaderNodeMath')
+        gate.operation = 'GREATER_THAN'
+        gate.inputs[1].default_value = uf - 0.5
+        gate.location = (tex.location.x - 500, tex.location.y + 150 * uf)
+        links.new(attr.outputs['Fac'], gate.inputs[0])
+
+        mix = nodes.new('ShaderNodeMix')
+        mix.data_type = 'VECTOR'
+        mix.location = (tex.location.x - 300, tex.location.y + 150 * uf)
+        links.new(gate.outputs['Value'], mix.inputs['Factor'])
+        # data_type VECTOR: A/B are the vector-typed sockets
+        mix.inputs[4].default_value = (0, 0, 0)
+        links.new(current, mix.inputs[4])       # A: previous frame's UV
+        links.new(uv_node.outputs['UV'], mix.inputs[5])  # B: this frame's UV
+        current = mix.outputs[1]                # Result (vector)
+    links.new(current, tex.inputs['Vector'])
+
+
 def _parse_palette_file(path):
     """Parse a Tribes palette into either:
     - a dict {palette_id: 256-entry RGB list} for Darkstar PL98 multi-palettes
@@ -937,6 +989,7 @@ class ImportDTS(bpy.types.Operator, ImportHelper):
                 array_faces_material = []  # Blender
                 array_texvert = []  # Blender
                 array_uvs = []  # Blender
+                array_uv_texidx = []  # per-loop texture-vert indices (animated UVs)
 
                 if hasattr(mesh_data, 'frames'):
                     frames = mesh_data.frames
@@ -1019,6 +1072,11 @@ class ImportDTS(bpy.types.Operator, ImportHelper):
                     array_uvs.append(array_val)
                     array_val = array_texvert[face.vip[2].texture_index]
                     array_uvs.append(array_val)
+                    # Per-loop texture indices, kept for animated-UV meshes
+                    # (extra texture-vertex frames index as texidx + frame*tvpf)
+                    array_uv_texidx.extend((face.vip[0].texture_index,
+                                            face.vip[1].texture_index,
+                                            face.vip[2].texture_index))
                 # store(']];')
 
                 # Flip UV normals
@@ -1190,6 +1248,27 @@ class ImportDTS(bpy.types.Operator, ImportHelper):
                 new_uv = ob.data.uv_layers.new(name='UV Map')
                 for loop in ob.data.loops:
                     new_uv.data[loop.index].uv = array_uvs[loop.index]
+
+                # Animated UVs ("texture frames"): the mesh stores several
+                # complete UV sets and the engine's material track picks one
+                # per keyframe (e.g. the Plasma Gun cartridge slides its
+                # artwork when fired). Import each extra set as its own UV
+                # layer and let the material select it via the object's
+                # "uv_frame" property.
+                tvpf = getattr(mesh_data, 'num_texture_vertices_per_frame', 0) or 0
+                ntv = mesh_data.num_texture_vertices
+                if tvpf > 0 and ntv > tvpf and ntv % tvpf == 0:
+                    n_uv_frames = ntv // tvpf
+                    for uf in range(1, n_uv_frames):
+                        layer = ob.data.uv_layers.new(name='UVFrame_{}'.format(uf))
+                        for loop in ob.data.loops:
+                            layer.data[loop.index].uv = array_texvert[array_uv_texidx[loop.index] + uf * tvpf]
+                    ob.data.uv_layers['UV Map'].active_render = True
+                    object["dts_uv_frames"] = n_uv_frames
+                    object["uv_frame"] = 0
+                    for tex in textures:
+                        _setup_uv_frame_material(bpy.data.materials.get(tex), n_uv_frames)
+                    print(f"  Imported {n_uv_frames} UV frames (animated UVs) for '{obj_name}'")
 
                 obj_id += 1
 
@@ -1397,6 +1476,31 @@ class ImportDTS(bpy.types.Operator, ImportHelper):
                                 continue
                             first_keyframe = subseq.first_keyframe
 
+                            # Material track: for meshes with several UV sets
+                            # ("texture frames", e.g. the Plasma Gun cartridge)
+                            # each key's low 12 bits select the UV frame. Key
+                            # the object's "uv_frame" property, which the
+                            # material's UV-select chain reads. Like the
+                            # engine, the last value persists after the
+                            # sequence ends (no reset).
+                            if keyframes[first_keyframe].mat_index & FLAG_MATERIAL_TRACK:
+                                ob = bpy.context.scene.objects[obj_dts_to_blender_map[obj_i]]
+                                if int(ob.get("dts_uv_frames", 0)) > 1:
+                                    seq_len_mt = max(last_subseq_len, subseq.num_keyframes + 1)
+                                    for key in range(first_keyframe, first_keyframe + subseq.num_keyframes):
+                                        kf = keyframes[key]
+                                        pos = getattr(kf, 'position', 0.0) or 0.0
+                                        scene.frame_set(frame_id + int(round(pos * seq_len_mt)))
+                                        ob["uv_frame"] = kf.mat_index & 0x0FFF
+                                        ob.keyframe_insert(data_path='["uv_frame"]')
+                                    for fc in _action_fcurves(ob.animation_data):
+                                        if fc.data_path == '["uv_frame"]':
+                                            for kp in fc.keyframe_points:
+                                                kp.interpolation = 'CONSTANT'
+                                    last_subseq_len = max(last_subseq_len, seq_len_mt)
+                                # material tracks can share flag bits with
+                                # vis/frame tracks -- fall through, no continue
+
                             # Visibility track: key hide_viewport/hide_render so
                             # e.g. muzzle flashes only show during "fire",
                             # returning to the object's default state after.
@@ -1488,6 +1592,26 @@ class ImportDTS(bpy.types.Operator, ImportHelper):
 
                     frame_id += last_subseq_len
                 scene.timeline_markers.new('End of {}'.format(seq_name), frame=frame_id)
+
+            # Sequences that don't animate a node HOLD it at its last pose in
+            # the engine, but on the Blender timeline that node simply has no
+            # keys there -- its fcurve interpolates toward its next key (often
+            # a later sequence's rest pose), so characters slowly slide back
+            # to origin during e.g. celebration clips. Node keys are laid one
+            # frame apart inside a sequence, so any wider gap between two keys
+            # is such a hold span: make the key at the gap's start CONSTANT so
+            # the pose holds exactly, without touching in-sequence smoothing.
+            for node_name in node_blender_map.values():
+                node_ob = bpy.context.scene.objects.get(node_name)
+                if node_ob is None:
+                    continue
+                for fc in _action_fcurves(node_ob.animation_data):
+                    if fc.data_path not in ('location', 'rotation_quaternion'):
+                        continue
+                    pts = fc.keyframe_points
+                    for i in range(len(pts) - 1):
+                        if pts[i + 1].co[0] - pts[i].co[0] > 1.5:
+                            pts[i].interpolation = 'CONSTANT'
 
             # Extend the playback range to cover every imported sequence
             # (Blender's default End of 250 cuts the loop off partway through).

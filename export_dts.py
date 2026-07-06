@@ -1180,11 +1180,10 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
 
     # ========== NEW MODEL OPTIONS (for models created from scratch in Blender) ==========
 
-    convert_axes: BoolProperty(
-        name="Convert Axes (Z→Y)",
-        description="[NEW MODEL] Convert Blender Z-up to DTS Y-up coordinates. Enable for models created in Blender; OFF for round-trips",
-        default=False,
-    )
+    # NOTE: the old "Convert Axes (Z->Y)" option was removed: it was based
+    # on a wrong premise. Tribes DTS is Z-up right-handed, identical to
+    # Blender -- there is no axis conversion to make (enabling it tipped
+    # models 90 degrees). Verified from engine source (Ml/Ts3).
 
     convert_winding: BoolProperty(
         name="Convert Winding (CCW→CW)",
@@ -1222,63 +1221,51 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
         return idx
     
     def _copy_lod36_to_lower(self, objects):
-        """Copy mesh data from LOD36 objects to LOD10 and LOD2 counterparts.
-        
-        This eliminates distance-based detail reduction - all LODs use high detail.
+        """Copy each mesh group's HIGHEST-detail data onto its lower-LOD
+        counterparts, eliminating distance-based detail reduction.
+
+        Works with any detail-size scheme, not just characters' 36/10/2:
+        DTS names encode the detail size as a trailing number ("jammer 15",
+        "submesh_head 36"), so objects sharing a base name form one LOD
+        group and the largest trailing number is the source. Groups with a
+        single member (bounds, collision, one-LOD props) are untouched.
         Returns the number of objects updated.
         """
-        import bmesh
-        
-        # Map base names to LOD36 source objects
-        lod36_suffixes = [' 36', '36']
-        target_suffixes = [' 10', '10', ' 2', '2']
-        
-        sources = {}
+        import re
+
+        groups = {}  # base name -> list of (detail_size, obj)
         for obj in objects:
             if obj.type != 'MESH':
                 continue
-            name = obj.name
-            for suffix in lod36_suffixes:
-                if name.endswith(suffix):
-                    base = name[:-len(suffix)].strip()
-                    sources[base] = obj
-                    break
-        
-        if not sources:
-            return 0
-        
+            # strip Blender's .00x duplicate suffix before reading the size
+            name = re.sub(r'\.\d+$', '', obj.name)
+            m = re.match(r'^(.*?)\s*(\d+)$', name)
+            if not m or not m.group(1).strip():
+                continue
+            groups.setdefault(m.group(1).strip().lower(), []).append((int(m.group(2)), obj))
+
         copied_count = 0
-        for obj in objects:
-            if obj.type != 'MESH':
+        for base, members in groups.items():
+            if len(members) < 2:
                 continue
-            
-            name = obj.name
-            target_suffix = ""
-            base_name = ""
-            
-            # Check if this is a target LOD (10 or 2)
-            for suffix in target_suffixes:
-                if name.endswith(suffix):
-                    base_name = name[:-len(suffix)].strip()
-                    target_suffix = suffix.strip()
-                    break
-            
-            if base_name in sources and target_suffix:
-                src_obj = sources[base_name]
-                if src_obj == obj:
-                    continue
-                
-                # Copy mesh data from LOD36 source
+            sizes = [s for s, _ in members]
+            if len(set(sizes)) != len(sizes):
+                # duplicate sizes = same-named sibling meshes (e.g. several
+                # 'flame' parts), not a LOD chain -- don't clobber them
+                continue
+            members.sort(key=lambda e: e[0], reverse=True)
+            src_obj = members[0][1]
+            for _, obj in members[1:]:
                 new_data = src_obj.data.copy()
                 old_data = obj.data
                 obj.data = new_data
-                
+
                 # Clean up old data if not used elsewhere
                 if old_data.users == 0:
                     bpy.data.meshes.remove(old_data)
-                
+
                 copied_count += 1
-        
+
         return copied_count
 
 
@@ -1517,9 +1504,6 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                 for v in obj.data.vertices:
                     world_v = matrix @ v.co
                     v_scaled = [world_v[i] * self.global_scale for i in range(3)]
-                    # Apply axis conversion if enabled
-                    if self.convert_axes:
-                        v_scaled = [v_scaled[0], v_scaled[2], -v_scaled[1]]
                     all_mesh_verts.append(v_scaled)
                     for i in range(3):
                         shape_min_all[i] = min(shape_min_all[i], v_scaled[i])
@@ -1558,9 +1542,6 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                     for v in obj.data.vertices:
                         world_v = b_matrix @ v.co
                         v_scaled = [world_v[i] * self.global_scale for i in range(3)]
-                        # Apply axis conversion if enabled
-                        if self.convert_axes:
-                            v_scaled = [v_scaled[0], v_scaled[2], -v_scaled[1]]
                         for i in range(3):
                             b_min[i] = min(b_min[i], v_scaled[i])
                             b_max[i] = max(b_max[i], v_scaled[i])
@@ -1684,12 +1665,6 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                 
                 # 3. Apply global scale (usually 1.0, but used for unit conversion)
                 v_s = [v_node[i] * self.global_scale for i in range(3)]
-                
-                # 4. Apply axis conversion if enabled (Blender Z-up -> DTS Y-up)
-                if self.convert_axes:
-                    # Blender X -> DTS X, Blender Z -> DTS Y, Blender -Y -> DTS Z
-                    v_s = [v_s[0], v_s[2], -v_s[1]]
-                
                 transformed_verts_dict[v_idx] = v_s
                 for i in range(3):
                     min_local[i] = min(min_local[i], v_s[i])
@@ -1706,8 +1681,6 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                         _wv = obj.matrix_world @ _d.co
                         _vn = node_matrix_inv @ _wv
                         _vs = [_vn[i] * self.global_scale for i in range(3)]
-                        if self.convert_axes:
-                            _vs = [_vs[0], _vs[2], -_vs[1]]
                         for i in range(3):
                             min_local[i] = min(min_local[i], _vs[i])
                             max_local[i] = max(max_local[i], _vs[i])
@@ -1742,12 +1715,7 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                     v_idx = mesh.loops[loop_idx].vertex_index
                     loop_normal = mesh.loops[loop_idx].normal
                     
-                    # Apply axis conversion to normal if enabled
-                    if self.convert_axes:
-                        converted_normal = (loop_normal[0], loop_normal[2], -loop_normal[1])
-                    else:
-                        converted_normal = loop_normal
-                    n_idx = find_closest_normal(converted_normal)
+                    n_idx = find_closest_normal(loop_normal)
 
                     
                     key = (v_idx, n_idx)
@@ -1853,22 +1821,46 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                 frame_scale = (bounds_size[0] / 255.0, bounds_size[1] / 255.0, bounds_size[2] / 255.0)
                 frame_origin = min_pt
             
-            # Get UVs and associate with loops
-            uv_layer = mesh.uv_layers.active
+            # Get UVs and associate with loops.
+            # Animated-UV meshes (imported "texture frames", e.g. the Plasma
+            # Gun cartridge) carry extra UVFrame_n layers; the DTS stores all
+            # frames' UVs in one array (frame f's set at slot + f*perFrame)
+            # and the engine's material track selects the block. De-dup by
+            # the tuple of UVs ACROSS all frames so a slot index is valid in
+            # every frame block.
+            uv_layer = mesh.uv_layers.get('UV Map') or mesh.uv_layers.active
+            n_uv_frames = int(obj.get("dts_uv_frames", 0))
+            uv_frame_layers = []
+            if uv_layer is not None and n_uv_frames > 1:
+                uv_frame_layers = [mesh.uv_layers.get('UVFrame_{}'.format(f))
+                                   for f in range(1, n_uv_frames)]
+                if any(l is None for l in uv_frame_layers):
+                    uv_frame_layers = []  # layers were deleted; export static
             texture_verts = []
             loop_to_uv_idx = {}
             if uv_layer:
-                uv_dict = {} # (u, v) -> uv_idx
+                uv_dict = {} # per-frame uv tuple -> uv_idx
+                uv_frame_verts = [[] for _ in uv_frame_layers]
                 for loop in mesh.loops:
                     uv = uv_layer.data[loop.index].uv
                     uv_val = (uv.x, 1.0 - uv.y)
-                    if uv_val not in uv_dict:
+                    frame_vals = tuple(
+                        (l.data[loop.index].uv.x, 1.0 - l.data[loop.index].uv.y)
+                        for l in uv_frame_layers)
+                    key = (uv_val,) + frame_vals
+                    if key not in uv_dict:
                         uv_idx = len(texture_verts)
-                        uv_dict[uv_val] = uv_idx
+                        uv_dict[key] = uv_idx
                         texture_verts.append(uv_val)
-                    loop_to_uv_idx[loop.index] = uv_dict[uv_val]
+                        for fi, fv in enumerate(frame_vals):
+                            uv_frame_verts[fi].append(fv)
+                    loop_to_uv_idx[loop.index] = uv_dict[key]
+                uv_verts_per_frame = len(texture_verts)
+                for fv_block in uv_frame_verts:
+                    texture_verts.extend(fv_block)
             else:
                 texture_verts = [(0.0, 0.0)]
+                uv_verts_per_frame = 1
                 for loop in mesh.loops:
                     loop_to_uv_idx[loop.index] = 0
 
@@ -1908,7 +1900,6 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
             faithful = (
                 "dts_frame_scale_x" in obj
                 and abs(obj.get("dts_import_scale", 1.0) - 1.0) < 1e-6
-                and not self.convert_axes
                 and not self.convert_winding
                 and not use_donor_sync
                 and _morph_faithful_ok
@@ -2131,12 +2122,10 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                         # node space -> global scale -> axis conversion). The
                         # bounds-union pass above already does this; packing raw
                         # local coords here mangled morph frames whenever the
-                        # object had a non-identity transform or convert_axes on.
+                        # object had a non-identity transform.
                         sk_world = obj.matrix_world @ key_block.data[v_idx].co
                         sk_node = node_matrix_inv @ sk_world
                         sk = [sk_node[i] * self.global_scale for i in range(3)]
-                        if self.convert_axes:
-                            sk = [sk[0], sk[2], -sk[1]]
                         local_x, local_y, local_z = sk
 
                         # Pack to 0-255 using the SAME local bounds as the basis frame
@@ -2174,7 +2163,7 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
                 'num_vertices': len(all_verts_flat),
                 'num_vertices_per_frame': len(packed_verts),
                 'num_texture_vertices': len(texture_verts),
-                'num_texture_vertices_per_frame': len(texture_verts),
+                'num_texture_vertices_per_frame': uv_verts_per_frame,
                 'num_faces': len(faces),
                 'num_frames': num_frames,
                 'radius': radius,
@@ -2775,7 +2764,6 @@ class ExportDTS(bpy.types.Operator, ExportHelper):
         layout.separator()
         box_new = layout.box()
         box_new.label(text="New Model Options (Created in Blender):", icon='MESH_CUBE')
-        box_new.prop(self, "convert_axes")
         box_new.prop(self, "convert_winding")
         
         # ========== OPTIMIZATION OPTIONS ==========
