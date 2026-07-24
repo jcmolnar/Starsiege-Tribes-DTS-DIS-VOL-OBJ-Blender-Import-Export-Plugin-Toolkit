@@ -69,6 +69,115 @@ def clean(b):
     return b.split(b'\x00')[0].decode('latin-1', 'replace')
 
 
+def fix_winding(buf):
+    """Reverse faces of meshes wound opposite the model majority.
+
+    Returns (new_bytes, meshes_flipped, flipped_names). Starsiege ships some
+    meshes wound the other way (the Herc cockpit canopy is CCW while the rest
+    of the mech is CW); Tribes' clockwise-front backface cull renders those
+    inside-out, so they read as see-through from outside. This detects each
+    mesh's winding (cross-product face normal vs outward-from-centroid, in
+    mesh-local frame-0 space -- rigid node transforms preserve the sign) and,
+    for meshes disagreeing with the model majority, swaps each face's vip[1]
+    and vip[2] (8-byte vertex/texture-index pairs). Swapping the pair reverses
+    the vertex order AND the UVs together, so the texture stays put.
+
+    Meshes live as separate CelAnimMesh PERS sections after the shape, so we
+    can't offset into them from the shape header; instead we monkeypatch
+    Dts.Face to record each face's absolute byte offset during a parse (faces
+    are read only from meshes, in mesh order), then patch those offsets.
+    """
+    import dts as _dtsmod
+    face_off = []
+    orig = _dtsmod.Dts.Face._read
+
+    def rec(self):
+        face_off.append(self._io.pos())
+        orig(self)
+
+    _dtsmod.Dts.Face._read = rec
+    try:
+        d = _dtsmod.Dts(KaitaiStream(BytesIO(buf)))
+    finally:
+        _dtsmod.Dts.Face._read = orig
+
+    def cross(a, b):
+        return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
+
+    def sub(a, b):
+        return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
+
+    def dot(a, b):
+        return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]
+
+    # per-mesh dominant winding sign: True = "outward" (CCW by the cross test)
+    signs = []
+    fi = 0
+    per_mesh_faceoff = []
+    for m in d.meshes:
+        nf = m.num_faces
+        offs = face_off[fi:fi + nf]
+        fi += nf
+        per_mesh_faceoff.append(offs)
+        fr = m.frames[0]
+        sc = (fr.scale.x, fr.scale.y, fr.scale.z)
+        og = (fr.origin.x, fr.origin.y, fr.origin.z)
+        first = fr.first_vert
+        nvpf = m.num_vertices_per_frame
+
+        def lv(local_idx):
+            v = m.vertices[first + local_idx]
+            return (v.x*sc[0]+og[0], v.y*sc[1]+og[1], v.z*sc[2]+og[2])
+
+        if not nf or not nvpf:
+            signs.append(None)
+            continue
+        pts = [lv(k) for k in range(nvpf)]
+        cen = (sum(p[0] for p in pts)/nvpf,
+               sum(p[1] for p in pts)/nvpf,
+               sum(p[2] for p in pts)/nvpf)
+        out = inn = 0
+        for f in m.faces:
+            p0 = lv(f.vip[0].vertex_index)
+            p1 = lv(f.vip[1].vertex_index)
+            p2 = lv(f.vip[2].vertex_index)
+            n = cross(sub(p1, p0), sub(p2, p0))
+            fc = ((p0[0]+p1[0]+p2[0])/3, (p0[1]+p1[1]+p2[1])/3,
+                  (p0[2]+p1[2]+p2[2])/3)
+            if dot(n, sub(fc, cen)) >= 0:
+                out += 1
+            else:
+                inn += 1
+        signs.append(out > inn)
+
+    real = [s for s in signs if s is not None]
+    if not real:
+        return buf, 0, []
+    majority = sum(real) >= len(real) / 2.0    # True if most meshes are "outward"
+    out = bytearray(buf)
+    flipped = 0
+    names = []
+    # object names for reporting (objects reference meshes by index)
+    sh = d.shape.data.obj_data
+    mesh_name = {}
+    objs = getattr(sh, 'objects_v7', None) or getattr(sh, 'objects', [])
+    for o in objs:
+        mesh_name.setdefault(o.mesh_index,
+                             clean(sh.names[o.name]) if o.name < len(sh.names) else '?')
+
+    for mi, sign in enumerate(signs):
+        if sign is None or sign == majority:
+            continue
+        for off in per_mesh_faceoff[mi]:
+            vip1 = bytes(out[off + 8:off + 16])
+            vip2 = bytes(out[off + 16:off + 24])
+            out[off + 8:off + 16] = vip2
+            out[off + 16:off + 24] = vip1
+        flipped += 1
+        names.append(mesh_name.get(mi, 'mesh%d' % mi))
+    return bytes(out), flipped, names
+
+
 class ShapeV7:
     """Just enough structure to append nodes/transforms/names to a v7 shape."""
 

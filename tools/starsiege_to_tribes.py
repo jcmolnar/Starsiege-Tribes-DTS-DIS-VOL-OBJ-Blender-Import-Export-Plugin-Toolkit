@@ -565,6 +565,9 @@ def main():
     ap.add_argument('--keep-lods', action='store_true',
                     help='keep the reduced lower LODs (default: draw full '
                          'detail at every LOD so the top never culls at range)')
+    ap.add_argument('--keep-winding', action='store_true',
+                    help='do not reverse opposite-wound meshes (default: flip '
+                         'them so nothing renders inside-out / see-through)')
     ap.add_argument('--no-nodes', action='store_true',
                     help='skip injecting the Tribes player utility nodes')
     ap.add_argument('--pitch-node', default=None,
@@ -685,6 +688,14 @@ def main():
         patched, n_lod = sv.force_full_lod()
         print('  full-LOD: repointed %d detail levels to detail 0 (no more '
               'cockpit-drop at distance)' % n_lod)
+
+    # Reverse any meshes wound opposite the model (the Starsiege cockpit canopy
+    # is CCW while the mech is CW -> Tribes' CW-front cull renders it inside-out
+    # / see-through). Flips vertex order + UVs in lockstep.
+    if not args.keep_winding:
+        patched, n_flip, flip_names = ipn.fix_winding(patched)
+        print('  winding: reversed %d opposite-wound mesh(es)%s'
+              % (n_flip, (' [' + ', '.join(flip_names) + ']') if flip_names else ''))
 
     dts_out = os.path.join(args.outdir, shapename + '.dts')
     with open(dts_out, 'wb') as f:
