@@ -119,6 +119,49 @@ class ShapeV7:
                     return i
         return None
 
+    def strip_sequence_tracks(self, seq_name):
+        """Detach a sequence's transform tracks from every NODE, in place.
+
+        Returns (new_bytes, tracks_detached). The sequence itself stays (the
+        engine AssertFatal's if "looks" is missing, player.cpp:385) but no node
+        is owned by a thread playing it. Needed because Tribes plays the "looks"
+        aim sequence on a high-priority viewThread; Ts3 assigns each node to the
+        highest-priority thread that has a track for it, so a Herc's
+        full-skeleton "looks" clamps the whole body and the run cycle plays
+        invisibly underneath (diagnosed in-engine). Detaching "looks" hands
+        every node back to the movement thread.
+
+        Done by rewriting the `sequence_index` field of each NODE-referenced
+        "looks" subsequence to an unused index (`num_seq`), which no thread ever
+        plays (current sequence is always in [0, num_seq)). This changes NO
+        array sizes and NO other references: the subsequence array is SHARED
+        with objects (mesh frame-track / visibility animation), so removing or
+        reindexing entries would corrupt object tracks. Object subsequences and
+        all keyframes are left untouched.
+        """
+        buf = self.buf
+        s = self.sh
+        names = self.names
+        seq_idx = next((i for i, q in enumerate(s.sequences)
+                        if names[q.name] == seq_name), None)
+        if seq_idx is None:
+            return buf, 0
+
+        SUBSEQ_SIZE = 12
+        unused = s.num_seq                 # never equals any played sequence
+        subs = s.subsequences_v7
+        out = bytearray(buf)
+        detached = 0
+        for n in self.nodes:               # NODE blocks only -- not objects
+            first = n.first_subsequence
+            for k in range(n.num_subsequences):
+                si = first + k
+                if subs[si].sequence_index == seq_idx:
+                    struct.pack_into('<I', out, self.off_subseq + si * SUBSEQ_SIZE,
+                                     unused)
+                    detached += 1
+        return bytes(out), detached
+
     # ---------------------------------------------------------------
     def build(self, new_nodes, renames=None):
         """new_nodes: [(name, parent_index)] or [(name, parent_index, translate)].

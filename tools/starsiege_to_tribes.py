@@ -663,6 +663,18 @@ def main():
         if missing:
             print('    MISSING: %s' % missing)
 
+    # Strip the "looks" (aim) sequence's tracks. Tribes plays "looks" on a
+    # high-priority viewThread; Ts3 gives every node "looks" tracks to that
+    # thread, so a Herc's full-skeleton "looks" clamps the whole body and the
+    # walk cycle plays invisibly (diagnosed in-engine). Emptying it hands the
+    # body back to the movement thread. The sequence must still EXIST (engine
+    # AssertFatal on a missing "looks").
+    import inject_player_nodes as ipn
+    sv = ipn.ShapeV7(patched)
+    patched, n_stripped = sv.strip_sequence_tracks('looks')
+    print('\n  looks-sequence: stripped %d node tracks (was clamping the body)'
+          % n_stripped)
+
     dts_out = os.path.join(args.outdir, shapename + '.dts')
     with open(dts_out, 'wb') as f:
         f.write(patched)
