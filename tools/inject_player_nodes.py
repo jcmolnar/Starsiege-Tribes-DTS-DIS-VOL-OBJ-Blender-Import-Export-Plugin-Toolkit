@@ -121,31 +121,48 @@ class ShapeV7:
 
     # ---------------------------------------------------------------
     def build(self, new_nodes, renames=None):
-        """new_nodes: [(name, parent_index)].  Returns the patched bytes.
+        """new_nodes: [(name, parent_index)] or [(name, parent_index, translate)].
 
-        All new nodes share one identity transform appended to the pool, and
-        carry no subsequences, so no animation data has to be rewritten.
+        Nodes with no translate (or None) share one appended identity
+        transform; nodes with a translate (x, y, z) each get their own appended
+        transform. New nodes carry no subsequences, so no animation data is
+        rewritten.
         """
         buf = self.buf
         s = self.sh
         n_new = len(new_nodes)
 
-        identity_xf = struct.pack('<4h', 0, 0, 0, 32767) + \
-            struct.pack('<3f', 0.0, 0.0, 0.0) + struct.pack('<3f', 1.0, 1.0, 1.0)
-        assert len(identity_xf) == XFORM_SIZE
-        xf_index = s.num_transforms          # index of the appended transform
+        def xf_bytes(t):
+            return (struct.pack('<4h', 0, 0, 0, 32767) +   # identity Quat16
+                    struct.pack('<3f', t[0], t[1], t[2]) +  # translate
+                    struct.pack('<3f', 1.0, 1.0, 1.0))      # unit scale
+
+        # Build the appended transform pool: one shared identity, plus one per
+        # node that asks for a specific translate.
+        identity_index = s.num_transforms
+        xform_blob = bytearray(xf_bytes((0.0, 0.0, 0.0)))
+        next_index = identity_index + 1
 
         name_bytes = bytearray()
         node_bytes = bytearray()
-        for k, (nm, parent) in enumerate(new_nodes):
+        for k, entry in enumerate(new_nodes):
+            nm, parent = entry[0], entry[1]
+            translate = entry[2] if len(entry) > 2 else None
             if len(nm) > NAME_SIZE - 1:
                 raise ValueError('name too long: %r' % nm)
+            if translate is None:
+                dt = identity_index
+            else:
+                dt = next_index
+                xform_blob += xf_bytes(translate)
+                next_index += 1
             name_bytes += nm.encode('latin-1').ljust(NAME_SIZE, b'\x00')
             node_bytes += struct.pack('<IiIII',
                                       s.num_names + k,   # name index
                                       parent,            # parent node
                                       0, 0,              # no subsequences
-                                      xf_index)          # default transform
+                                      dt)                # default transform
+        n_new_xf = next_index - identity_index
 
         # Each array is contiguous, so grow them in place:
         #   header | nodes +NEW | seq..keyframes | transforms +NEW |
@@ -154,39 +171,51 @@ class ShapeV7:
         out += buf[:self.off_seq]          # header + existing nodes
         out += node_bytes                  # new nodes
         out += buf[self.off_seq:self.off_names]   # seq, subseq, keyframes, xforms
-        out += identity_xf                 # the shared identity transform
+        out += xform_blob                  # appended transforms
         out += buf[self.off_names:self.off_objects]   # existing names
         out += name_bytes                  # new names
         out += buf[self.off_objects:]      # objects, details, ..., meshes, mats
 
         # fix the counts and the PERS payload size
         struct.pack_into('<I', out, self.hdr + 0, s.num_nodes + n_new)
-        struct.pack_into('<I', out, self.hdr + 16, s.num_transforms + 1)
+        struct.pack_into('<I', out, self.hdr + 16, s.num_transforms + n_new_xf)
         struct.pack_into('<I', out, self.hdr + 20, s.num_names + n_new)
         struct.pack_into('<I', out, 4, len(out) - 8)     # PERS payload size
 
         if renames:
-            base = self.off_names + len(node_bytes) + XFORM_SIZE
+            base = self.off_names + len(node_bytes) + len(xform_blob)
             for idx, newname in renames:
                 struct.pack_into('<24s', out, base + idx * NAME_SIZE,
                                  newname.encode('latin-1').ljust(NAME_SIZE, b'\x00'))
         return bytes(out)
 
 
-def plan(shape, pitch_node=None):
-    """Work out which nodes to add (and any renames) for this shape."""
+def plan(shape, pitch_node=None, cam_height=None):
+    """Work out which nodes to add (and any renames) for this shape.
+
+    cam_height: world Z (metres) for the third-person chase camera pivot.
+    Player::getCameraTransform (player.cpp:1336) reads the chasecam node's
+    world transform, ZEROES x/y, and uses z as the orbit height, then pushes
+    back by camDist. At z=0 (a plain injected node) the camera sits on the
+    ground looking up; setting it to ~upper-body height frames the model.
+    """
     s = shape.sh
     existing = {shape.node_name(i).lower() for i in range(len(shape.nodes))}
     new_nodes = []
     renames = []
     notes = []
 
-    # one-off nodes, parented to node 0 (the shape root, "bounds")
+    # one-off nodes, parented to node 0 (the shape root, "bounds").
+    # chasecam gets a Z lift so the third-person camera isn't at the feet.
     for nm in ('dummyalways root', 'dummyalways chasecam'):
         if nm.lower() in existing:
             notes.append('%s already present' % nm)
             continue
-        new_nodes.append((nm, 0))
+        if nm == 'dummyalways chasecam' and cam_height:
+            new_nodes.append((nm, 0, (0.0, 0.0, float(cam_height))))
+            notes.append('chasecam pivot z = %.2f' % cam_height)
+        else:
+            new_nodes.append((nm, 0))
 
     # per-detail nodes, named by DETAIL SIZE (see module docstring)
     for di, det in enumerate(s.details):

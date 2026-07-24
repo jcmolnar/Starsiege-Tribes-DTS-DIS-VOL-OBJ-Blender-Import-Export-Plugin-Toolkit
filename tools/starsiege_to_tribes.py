@@ -99,32 +99,40 @@ class GameFiles:
 
 # ---------------------------------------------------------------- textures
 
-def write_bmp8(path, width, height, indices, palette):
-    """Write an 8-bit Windows BMP with an embedded palette.
+def write_bmp24(path, width, height, indices, palette):
+    """Write a 24-bit true-color Windows BMP.
 
-    Tribes loads plain palettised BMPs, so baking the Starsiege palette in here
-    frees the shape from needing a .ppl at all.
+    Why 24-bit and not 8-bit: Tribes' bitmap loader (GFXBitmap::readMSBitmap,
+    engine\\Dgfx\\code\\g_bitmap.cpp) only reads an 8-bit BMP's *embedded*
+    palette when the caller passes BMF_INCLUDE_PALETTE -- which player-skin
+    loads do NOT. For an 8-bit skin it instead colors the indices with the
+    world palette (via the bfReserved2 palette index), so a Starsiege-indexed
+    skin comes out miscolored. A 24-bit BMP carries RGB directly (readMSBitmap
+    accepts bitDepth 8 or 24), so the Starsiege colors survive with no palette
+    dependency. We resolve the PBMP indices through the world .ppl here and
+    write the resulting RGB.
     """
-    row_padded = (width + 3) & ~3
+    row_padded = (width * 3 + 3) & ~3
+    pad = row_padded - width * 3
     pixel_bytes = row_padded * height
-    # BMP rows run bottom-up; PBMP data is top-down.
     rows = []
-    for y in range(height - 1, -1, -1):
-        row = bytes(indices[y * width:(y + 1) * width])
-        rows.append(row + b'\x00' * (row_padded - width))
+    for y in range(height - 1, -1, -1):        # BMP is bottom-up; PBMP top-down
+        row = bytearray()
+        base = y * width
+        for x in range(width):
+            idx = indices[base + x]
+            r, g, b = palette[idx] if idx < len(palette) else (0, 0, 0)
+            row += bytes((b, g, r))            # BMP pixels are BGR
+        row += b'\x00' * pad
+        rows.append(bytes(row))
     pixels = b''.join(rows)
 
-    pal = bytearray()
-    for i in range(256):
-        r, g, b = palette[i] if i < len(palette) else (0, 0, 0)
-        pal += bytes((b, g, r, 0))          # BMP palette is BGRA
-
-    offbits = 14 + 40 + 1024
+    offbits = 14 + 40
     fh = b'BM' + struct.pack('<IHHI', offbits + pixel_bytes, 0, 0, offbits)
-    ih = struct.pack('<IiiHHIIiiII', 40, width, height, 1, 8, 0,
-                     pixel_bytes, 2835, 2835, 256, 256)
+    ih = struct.pack('<IiiHHIIiiII', 40, width, height, 1, 24, 0,
+                     pixel_bytes, 2835, 2835, 0, 0)
     with open(path, 'wb') as f:
-        f.write(fh + ih + bytes(pal) + pixels)
+        f.write(fh + ih + pixels)
 
 
 def convert_texture(name, games, ppl_tables, outdir):
@@ -148,8 +156,8 @@ def convert_texture(name, games, ppl_tables, outdir):
     if palette is None:
         return None, 'no palette (PiDX=%s)' % pidx
     out = os.path.join(outdir, name)
-    write_bmp8(out, w, h, indices, palette)
-    return out, '%dx%d from %s' % (w, h, os.path.basename(src))
+    write_bmp24(out, w, h, indices, palette)
+    return out, '%dx%d 24-bit from %s' % (w, h, os.path.basename(src))
 
 
 # ---------------------------------------------------------------- sequences
@@ -235,7 +243,87 @@ def rename_sequences(buf, renames, verbose=True):
 
 # ---------------------------------------------------------------- datablock
 
-def emit_playerdata(shapename, dbname, sh_radius, outpath, renamed):
+def posed_extents(buf):
+    """Bind-pose world-space AABB of a shape: (min, max) as Point3F tuples.
+
+    Poses every LOD's meshes through the node hierarchy's default transforms
+    -- the same math the viewer uses -- so the collision box can be sized to
+    what the model actually occupies rather than the (spherical) shape radius.
+    """
+    d = Dts(KaitaiStream(BytesIO(buf)))
+    sh = d.shape.data.obj_data
+    nodes = sh.nodes_v7 if getattr(sh, 'nodes_v7', None) else sh.nodes
+    xf = sh.transforms_v7 if getattr(sh, 'transforms_v7', None) else sh.transforms
+
+    def qmul(a, b):
+        ax, ay, az, aw = a
+        bx, by, bz, bw = b
+        return (aw*bx+ax*bw+ay*bz-az*by, aw*by-ax*bz+ay*bw+az*bx,
+                aw*bz+ax*by-ay*bx+az*bw, aw*bw-ax*bx-ay*by-az*bz)
+
+    def qrot(q, v):
+        x, y, z, w = q
+        vx, vy, vz = v
+        tx, ty, tz = 2*(y*vz-z*vy), 2*(z*vx-x*vz), 2*(x*vy-y*vx)
+        return (vx+w*tx+(y*tz-z*ty), vy+w*ty+(z*tx-x*tz), vz+w*tz+(x*ty-y*tx))
+
+    def qtuple(t):
+        r = t.rotate
+        # Quat16 -> float, w reconstructed as in the importer (negated-W convention)
+        s = 1.0 / 32767.0
+        return (r.x*s, r.y*s, r.z*s, -(r.w*s))
+
+    cache = {}
+
+    def world(ni):
+        if ni in cache:
+            return cache[ni]
+        n = nodes[ni]
+        t = xf[n.default_transform] if hasattr(n, 'default_transform') else xf[n.dt]
+        q = qtuple(t)
+        p = (t.translate.x, t.translate.y, t.translate.z)
+        par = n.parent if hasattr(n, 'parent') else n.parent_node_index
+        if 0 <= par < len(nodes):
+            pq, pp = world(par)
+            wp = qrot(pq, p)
+            r = (qmul(pq, q), (pp[0]+wp[0], pp[1]+wp[1], pp[2]+wp[2]))
+        else:
+            r = (q, p)
+        cache[ni] = r
+        return r
+
+    objects = sh.objects_v7 if getattr(sh, 'objects_v7', None) else sh.objects
+    lo = [1e9, 1e9, 1e9]
+    hi = [-1e9, -1e9, -1e9]
+    for i, mesh in enumerate(d.meshes):
+        obj = next((o for o in objects if o.mesh_index == i), None)
+        if obj is None:
+            continue
+        nvpf = getattr(mesh, 'num_vertices_per_frame', 0) or 0
+        # skip face-less / vert-less placeholders (the "bounds" culling mesh),
+        # exactly as the viewer does, so they don't inflate the box
+        if not nvpf or not (getattr(mesh, 'faces', None) or []):
+            continue
+        q, pos = world(obj.node_index)
+        p = obj.object_offset.p       # Objectv7.object_offset is a Tmat3f
+        off = (p.x, p.y, p.z)
+        fr = mesh.frames[0]           # bind pose = first frame only
+        sc = (fr.scale.x, fr.scale.y, fr.scale.z)
+        org = (fr.origin.x, fr.origin.y, fr.origin.z)
+        first = fr.first_vert
+        for k in range(nvpf):
+            v = mesh.vertices[first + k]
+            lv = (v.x*sc[0]+org[0]+off[0], v.y*sc[1]+org[1]+off[1],
+                  v.z*sc[2]+org[2]+off[2])
+            wv = qrot(q, lv)
+            wx, wy, wz = pos[0]+wv[0], pos[1]+wv[1], pos[2]+wv[2]
+            lo[0] = min(lo[0], wx); hi[0] = max(hi[0], wx)
+            lo[1] = min(lo[1], wy); hi[1] = max(hi[1], wy)
+            lo[2] = min(lo[2], wz); hi[2] = max(hi[2], wz)
+    return tuple(lo), tuple(hi)
+
+
+def emit_playerdata(shapename, dbname, sh_radius, outpath, renamed, box=None):
     """Write a PlayerData whose animData only ever names sequences we have.
 
     Slots Tribes expects but a Herc lacks (jet, deaths, signals, strafes) are
@@ -281,12 +369,10 @@ def emit_playerdata(shapename, dbname, sh_radius, outpath, renamed):
     lines.append('// "dummy unused<N>", "dummy midback<N>", "dummy lowback<N>",')
     lines.append('// "dummy eye<N>" -- the names Player::initResources resolves.')
     lines.append('//')
-    lines.append('// Not yet tested in-game. Untested here: whether the walk cycle')
-    lines.append('// reads correctly at this scale, and collision -- the Herc is ~9m')
-    lines.append('// where a trooper is ~2m, and PlayerData has no explicit hull size.')
-    lines.append('//')
-    lines.append('// Deploy %s.dts + its .bmp skins into base\\, then:' % shapename)
-    lines.append('//     exec("%s.cs");' % dbname.lower())
+    lines.append('// Collision box + chase-camera height are sized to the model\'s')
+    lines.append('// measured bind-pose extents (a Herc is ~7m tall vs a trooper ~2m).')
+    lines.append('// Skins are 24-bit true-color BMP so the engine does not recolor them')
+    lines.append('// through its world palette. Install with the tool\'s --install step.')
     lines.append('//' + '-' * 74)
     lines.append('')
     lines.append('PlayerData %s' % dbname)
@@ -321,6 +407,36 @@ def emit_playerdata(shapename, dbname, sh_radius, outpath, renamed):
     lines.append('   minJetEnergy = 1;')
     lines.append('   jetForce = 0;         // and do not jet')
     lines.append('   jetEnergyDrain = 0;')
+    lines.append('')
+    # Collision hull. Player::initResources builds the collision bbox + sphere
+    # PURELY from these fields (player.cpp:472); without them the box is
+    # degenerate and the player falls through the world. Size to the model's
+    # measured bind-pose extents.
+    if box:
+        (lox, loy, _loz), (hix, hiy, hiz) = box
+        bw = max(abs(lox), abs(hix))
+        bd = max(abs(loy), abs(hiy))
+        bh = hiz                       # box spans z 0..height; feet ~ z 0
+        lines.append('   // collision hull sized to the model (measured extents:')
+        lines.append('   //   halfW %.2f  halfD %.2f  height %.2f)' % (bw, bd, bh))
+        lines.append('   boxWidth = %.2f;' % bw)
+        lines.append('   boxDepth = %.2f;' % bd)
+        lines.append('   boxNormalHeight = %.2f;' % bh)
+        lines.append('   boxCrouchHeight = %.2f;' % (bh * 0.7))
+    else:
+        lines.append('   boxWidth = 2.0;')
+        lines.append('   boxDepth = 3.0;')
+        lines.append('   boxNormalHeight = 7.0;')
+        lines.append('   boxCrouchHeight = 5.0;')
+    # hit-zone percentages: copied from a stock trooper (scale-independent)
+    lines.append('   boxNormalHeadPercentage  = 0.83;')
+    lines.append('   boxNormalTorsoPercentage = 0.53;')
+    lines.append('   boxCrouchHeadPercentage  = 0.6666;')
+    lines.append('   boxCrouchTorsoPercentage = 0.3333;')
+    lines.append('   boxHeadLeftPercentage  = 0;')
+    lines.append('   boxHeadRightPercentage = 1;')
+    lines.append('   boxHeadBackPercentage  = 0;')
+    lines.append('   boxHeadFrontPercentage = 1;')
     lines.append('')
     lines.append('   // animation name, sound, direction, firstPerson, chaseCam,')
     lines.append('   // thirdPerson, signalThread, priority')
@@ -458,6 +574,16 @@ def main():
     print('  version %d, %d nodes, %d sequences, %d meshes, radius %.2f'
           % (d.shape.data.version, sh.num_nodes, sh.num_seq, sh.num_meshes, sh.radius))
 
+    # measured bind-pose AABB -- drives both the collision box and the camera
+    # pivot height (node injection adds no geometry, so this is stable)
+    try:
+        box = posed_extents(raw)
+        head_z = box[1][2]
+    except Exception as e:
+        box = None
+        head_z = sh.radius
+        print('  WARNING: could not measure extents (%s)' % e)
+
     # --- palette -------------------------------------------------------
     ppl_tables = None
     ppl_raw, ppl_src = games.find(args.ppl)
@@ -491,14 +617,17 @@ def main():
     if not args.no_nodes:
         import inject_player_nodes as ipn
         shape = ipn.ShapeV7(patched)
-        new_nodes, renames, notes = ipn.plan(shape, args.pitch_node)
+        # pivot the chase camera around the upper body, not the feet
+        cam_h = head_z * 0.7 if head_z else None
+        new_nodes, renames, notes = ipn.plan(shape, args.pitch_node,
+                                             cam_height=cam_h)
         print('\n  player nodes: adding %d' % len(new_nodes))
         for n in notes:
             print('    %s' % n)
         patched = shape.build(new_nodes, renames)
         chk = ipn.ShapeV7(patched)
         have = {chk.node_name(i).lower() for i in range(len(chk.nodes))}
-        missing = [nm for nm, _p in new_nodes if nm.lower() not in have]
+        missing = [e[0] for e in new_nodes if e[0].lower() not in have]
         print('    all requested names resolve: %s' % (not missing))
         if missing:
             print('    MISSING: %s' % missing)
@@ -515,8 +644,13 @@ def main():
           % (len(Dts(KaitaiStream(BytesIO(patched))).meshes),
              [names[q.name] for q in chk.sequences]))
 
+    if box:
+        (lx, ly, _lz), (hx, hy, hz) = box
+        print('  collision box: halfW %.2f  halfD %.2f  height %.2f'
+              % (max(abs(lx), abs(hx)), max(abs(ly), abs(hy)), hz))
+
     cs_out = os.path.join(args.outdir, dbname.lower() + '.cs')
-    emit_playerdata(shapename, dbname, sh.radius, cs_out, applied)
+    emit_playerdata(shapename, dbname, sh.radius, cs_out, applied, box=box)
     print('  wrote %s  (PlayerData %s)' % (cs_out, dbname))
 
     produced = [dts_out, cs_out]
