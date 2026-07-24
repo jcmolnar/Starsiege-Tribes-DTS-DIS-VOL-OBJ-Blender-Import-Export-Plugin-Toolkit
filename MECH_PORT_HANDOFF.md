@@ -97,23 +97,29 @@ Specs written for the agent (in the engine tree): `HERC_CHASE_CAMERA_SPEC.md`
 
 ## OPEN BUGS
 
-### 1. Top of mech is see-through in third person (cosmetic, unsolved)
-- First person is fine. Legs render; the upper body reads as see-through.
-- **NOT LOD** — forcing full detail at every LOD (commit 862c056) did not fix
-  it (and did no harm; keep it).
-- **NOT near-plane** (1.0, camera ~16 units back), **NOT** camera-into-mesh
-  (`validateEyePoint` excludes self).
-- **Cannot be reproduced in the viewer** even single-sided from any angle
-  (low/close/looking-up all render solid). So it's specific to the in-game
-  render path for the player's OWN model in third person — the viewer doesn't
-  replicate whatever it is.
-- **Next steps (need in-game):** (a) log the actual camera eye position + view
-  direction in `getCameraTransform` for the mech and confirm where it really
-  is; (b) test `$pref::hercCamScale` much larger — does the top solidify when
-  farther? (c) look at how the engine renders the controlled player's own shape
-  in third person (any translucency / partial-hide / depth-sort path that
-  treats "self" specially); (d) check far-plane / depth-buffer range at mech
-  scale. Suspect it's a self-model render or depth/sort issue, not geometry.
+### 1. Cockpit canopy is see-through (DIAGNOSED — inverted winding)
+- **Confirmed root cause: the cockpit meshes have REVERSED face winding.** A
+  per-mesh winding check on `tr_talon.dts` (cross-product normal vs
+  outward-from-centroid) shows the whole mech is consistently CW-wound —
+  legs/body/head/pods all 100% CW, the winding Tribes culls to (CW front) — EXCEPT
+  `cockpit` / `cockpit1` / `cockpit2`, which are CCW (46/48 faces flipped). In
+  Tribes' clockwise-front backface cull the CCW cockpit renders inside-out, so
+  it's see-through from outside and only appears "from a specific angle" (when
+  you see its inner faces). This is a Starsiege authoring quirk — that mesh was
+  built inside-out; Starsiege must have drawn it two-sided.
+- This is why it read as "the top" (the cockpit canopy is the top center) and
+  why LOD/near-plane/camera theories all missed — it's geometry, mesh-specific.
+- The toolkit viewer masked it: `dts_viewer.py` renders two-sided (and does its
+  own import winding swap), so a reversed mesh still shows solid there.
+- **FIX (toolkit, ready to implement):** add a `fix_winding` step that, per
+  mesh, compares winding to the model majority and flips the outliers — swap
+  each face's vertex order (vip[1]↔vip[2]) AND texture indices in lockstep, so
+  the cockpit becomes CW like the rest. Verify offline by re-running the
+  winding check (cockpit should flip to match the legs); confirm in-game.
+  General enough to fix any other mech with the same quirk.
+- Alternative (engine, cruder): render the player's own shape two-sided
+  (disable backface cull for self) — fixes it but costs fill and can expose
+  other inside-out authoring elsewhere. Prefer the per-mesh flip.
 
 ---
 
