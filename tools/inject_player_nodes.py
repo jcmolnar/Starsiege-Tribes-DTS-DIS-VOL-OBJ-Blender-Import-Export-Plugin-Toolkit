@@ -50,13 +50,18 @@ NODE_SIZE = 20      # Nodev7:  name u4, parent s4, nSub u4, firstSub u4, dt u4
 XFORM_SIZE = 32     # Transformv7: Quat16(8) + Point3F(12) + Point3F(12)
 NAME_SIZE = 24
 
-# per-detail nodes: (base name, parent-preference by name prefix)
+# per-detail nodes: (base name, parent-preference by name prefix, translate)
+# translate is optional (default identity), in the PARENT's local space.
+# The eye is nudged forward+up out of the cockpit shell so first person looks
+# out over the mech's front instead of into interior geometry (cockpit/head
+# nodes are identity-oriented, so +Y == world forward).
+EYE_OFFSET = (0.0, 2.5, 1.0)
 PER_DETAIL = [
-    ('dummy hand',    ('right_pod', 'left_pod', 'head')),
-    ('dummy unused',  ('left_pod', 'right_pod', 'head')),
-    ('dummy midback', ('head',)),
-    ('dummy lowback', ('pelvis',)),
-    ('dummy eye',     ('cockpit', 'head')),
+    ('dummy hand',    ('right_pod', 'left_pod', 'head'), None),
+    ('dummy unused',  ('left_pod', 'right_pod', 'head'), None),
+    ('dummy midback', ('head',), None),
+    ('dummy lowback', ('pelvis',), None),
+    ('dummy eye',     ('cockpit', 'head'), EYE_OFFSET),
 ]
 
 
@@ -304,14 +309,17 @@ def plan(shape, pitch_node=None, cam_height=None):
             continue                      # utility/collision details
         root = det.root_node_index
         sub = shape.subtree(root)
-        for base, prefs in PER_DETAIL:
+        for base, prefs, translate in PER_DETAIL:
             nm = '%s%d' % (base, size)
             if nm.lower() in existing:
                 continue
             parent = shape.find_in(sub, prefs)
             if parent is None:
                 parent = root
-            new_nodes.append((nm, parent))
+            if translate is None:
+                new_nodes.append((nm, parent))
+            else:
+                new_nodes.append((nm, parent, translate))
 
         if pitch_node:
             # rename an existing node so insertOverride("lowerback",..) finds
@@ -365,8 +373,8 @@ def main():
     wanted = ['dummyalways root', 'dummyalways chasecam']
     for det in cs.details:
         if int(det.size) > 0:
-            for base, _ in PER_DETAIL:
-                wanted.append('%s%d' % (base, int(det.size)))
+            for entry in PER_DETAIL:
+                wanted.append('%s%d' % (entry[0], int(det.size)))
     for nm in wanted:
         hit = have.get(nm.lower())
         if hit is None:
