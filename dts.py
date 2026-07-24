@@ -652,6 +652,7 @@ class Dts(KaitaiStruct):
             self.end_sequence = self._io.read_u4le()
             self.start_position = self._io.read_f4le()
             self.end_position = self._io.read_f4le()
+            self.duration = self._io.read_f4le()
             self.transform = Dts.Transformv7(self._io, self, self._root)
 
 

@@ -82,12 +82,17 @@ def read_vol_index(volpath):
     'voli' block of packed 17-byte items (id u32, name-offset u32, blockOffset
     u32, size u32, compressType u8). File bytes live at blockOffset + 8
     (skipping the 'VBLK' sub-block header).
+
+    Older Starsiege-era archives (Starsiege\\Terrain\\*.Sim.vol, which hold the
+    world .ppl palettes) use ' VOL' magic -- note the LEADING space -- and open
+    the trailer with empty vols/voli placeholder blocks before the real ones.
     """
     import struct
     index = {}
     with open(volpath, 'rb') as f:
         data = f.read()
-    if data[:4] not in (b'PVOL', b'VOL '):
+    # 'PVOL' = Tribes-era; ' VOL' = older Starsiege-era archives (Terrain/*.Sim.vol)
+    if data[:4] not in (b'PVOL', b' VOL', b'VOL '):
         return index
     (trailer_off,) = struct.unpack_from('<I', data, 4)
     p = trailer_off
@@ -98,9 +103,11 @@ def read_vol_index(volpath):
         (size,) = struct.unpack_from('<I', data, p + 4)
         size &= 0x00FFFFFF
         body = data[p + 8:p + 8 + size]
-        if tag == b'vols':
+        # Starsiege-era ' VOL' archives open the trailer with EMPTY vols/voli
+        # placeholders before the real blocks, so skip zero-sized ones.
+        if tag == b'vols' and size:
             strings = body
-        elif tag == b'voli':
+        elif tag == b'voli' and size:
             items = body
             break
         p += 8 + size + (size & 1)

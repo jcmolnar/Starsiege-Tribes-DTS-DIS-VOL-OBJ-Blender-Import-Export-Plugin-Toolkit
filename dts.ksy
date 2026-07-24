@@ -223,6 +223,8 @@ types:
         type: f4
       - id: end_position
         type: f4
+      - id: duration
+        type: f4
       - id: transform
         type: transformv7
   frame_trigger:
