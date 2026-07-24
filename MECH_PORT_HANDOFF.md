@@ -97,29 +97,21 @@ Specs written for the agent (in the engine tree): `HERC_CHASE_CAMERA_SPEC.md`
 
 ## OPEN BUGS
 
-### 1. Cockpit canopy is see-through (DIAGNOSED — inverted winding)
-- **Confirmed root cause: the cockpit meshes have REVERSED face winding.** A
-  per-mesh winding check on `tr_talon.dts` (cross-product normal vs
-  outward-from-centroid) shows the whole mech is consistently CW-wound —
-  legs/body/head/pods all 100% CW, the winding Tribes culls to (CW front) — EXCEPT
-  `cockpit` / `cockpit1` / `cockpit2`, which are CCW (46/48 faces flipped). In
-  Tribes' clockwise-front backface cull the CCW cockpit renders inside-out, so
-  it's see-through from outside and only appears "from a specific angle" (when
-  you see its inner faces). This is a Starsiege authoring quirk — that mesh was
-  built inside-out; Starsiege must have drawn it two-sided.
-- This is why it read as "the top" (the cockpit canopy is the top center) and
-  why LOD/near-plane/camera theories all missed — it's geometry, mesh-specific.
-- The toolkit viewer masked it: `dts_viewer.py` renders two-sided (and does its
-  own import winding swap), so a reversed mesh still shows solid there.
-- **FIX (toolkit, ready to implement):** add a `fix_winding` step that, per
-  mesh, compares winding to the model majority and flips the outliers — swap
-  each face's vertex order (vip[1]↔vip[2]) AND texture indices in lockstep, so
-  the cockpit becomes CW like the rest. Verify offline by re-running the
-  winding check (cockpit should flip to match the legs); confirm in-game.
-  General enough to fix any other mech with the same quirk.
-- Alternative (engine, cruder): render the player's own shape two-sided
-  (disable backface cull for self) — fixes it but costs fill and can expose
-  other inside-out authoring elsewhere. Prefer the per-mesh flip.
+*(none blocking — the see-through cockpit is fixed, see below)*
+
+### FIXED: Cockpit canopy see-through — inverted winding (commit 28fa645)
+- Root cause: `cockpit`/`cockpit1`/`cockpit2` were wound CCW while the rest of
+  the mech is CW; Tribes' CW-front backface cull rendered the CCW cockpit
+  inside-out → see-through, visible only from the inner angle. A Starsiege
+  authoring quirk (canopy built inside-out; Starsiege drew it two-sided).
+  Not LOD/near-plane/camera — mesh geometry. (The viewer masked it by
+  rendering two-sided.)
+- Fix: `inject_player_nodes.fix_winding` compares each mesh's winding to the
+  model majority and reverses the outliers — swaps each face's vip[1]/vip[2]
+  (the 8-byte vertex+texture-index pairs), flipping vertex order and UVs in
+  lockstep. Wired into the pipeline (`--keep-winding` to skip). Verified: 0
+  non-cam meshes remain opposite-wound; cockpit renders solid + textured.
+  General — fixes the same quirk on any mech. **Re-test in-game to confirm.**
 
 ---
 
