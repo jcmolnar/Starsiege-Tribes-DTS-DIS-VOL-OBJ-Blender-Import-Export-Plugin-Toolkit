@@ -275,17 +275,15 @@ def emit_playerdata(shapename, dbname, sh_radius, outpath, renamed):
     lines.append('// A Herc walks because Tribes players pick their animation from measured')
     lines.append('// root motion; vehicles never animate. See the tool docstring.')
     lines.append('//')
-    lines.append('// !! NOT YET SAFE TO WEAR -- the shape still needs Tribes player utility')
-    lines.append('// !! nodes. Player::initResources (program/code/player.cpp) looks up')
-    lines.append('// !!   "dummyalways root"  -> getTransform(rnode)   [player.cpp:367]')
-    lines.append('// !!   "dummy hand" / "dummy unused" / "dummy midback" / "dummy lowback"')
-    lines.append('// !!                      -> getNode(mountNode[i])  [player.cpp:493]')
-    lines.append('// !! and BOTH accessors are unbounded --')
-    lines.append('// !!   getTransform(i) { return fTransformList[i]; }   (ts_shapeInst.h:670)')
-    lines.append('// !!   getNode(i)      { return fNodeInstanceList[i]; } (ts_shapeInst.h:641)')
-    lines.append('// !! so a missing node yields index -1 and reads out of bounds.')
-    lines.append('// !! Also wanted (safe if absent): "lowerback" for view pitch,')
-    lines.append('// !! "dummy eye", "dummyalways chasecam".')
+    lines.append('// The shape has had the Tribes player utility nodes injected')
+    lines.append('// (tools/inject_player_nodes.py): "dummyalways root",')
+    lines.append('// "dummyalways chasecam", and per detail size "dummy hand<N>",')
+    lines.append('// "dummy unused<N>", "dummy midback<N>", "dummy lowback<N>",')
+    lines.append('// "dummy eye<N>" -- the names Player::initResources resolves.')
+    lines.append('//')
+    lines.append('// Not yet tested in-game. Untested here: whether the walk cycle')
+    lines.append('// reads correctly at this scale, and collision -- the Herc is ~9m')
+    lines.append('// where a trooper is ~2m, and PlayerData has no explicit hull size.')
     lines.append('//')
     lines.append('// Deploy %s.dts + its .bmp skins into base\\, then:' % shapename)
     lines.append('//     exec("%s.cs");' % dbname.lower())
@@ -352,6 +350,12 @@ def main():
                     help='PlayerData name (default: derived from the shape)')
     ap.add_argument('--list', action='store_true',
                     help='list Herc-like shapes and exit')
+    ap.add_argument('--no-nodes', action='store_true',
+                    help='skip injecting the Tribes player utility nodes')
+    ap.add_argument('--pitch-node', default=None,
+                    help='rename this node (prefix, e.g. "head") to '
+                         'lowerback<size> so the view-pitch override pitches '
+                         'the upper body')
     args = ap.parse_args()
 
     print('indexing %s ...' % args.game)
@@ -411,6 +415,22 @@ def main():
     patched, applied = rename_sequences(raw, SEQUENCE_RENAMES)
     if not applied:
         print('    (none matched -- unusual sequence naming?)')
+
+    # --- player utility nodes -------------------------------------------
+    if not args.no_nodes:
+        import inject_player_nodes as ipn
+        shape = ipn.ShapeV7(patched)
+        new_nodes, renames, notes = ipn.plan(shape, args.pitch_node)
+        print('\n  player nodes: adding %d' % len(new_nodes))
+        for n in notes:
+            print('    %s' % n)
+        patched = shape.build(new_nodes, renames)
+        chk = ipn.ShapeV7(patched)
+        have = {chk.node_name(i).lower() for i in range(len(chk.nodes))}
+        missing = [nm for nm, _p in new_nodes if nm.lower() not in have]
+        print('    all requested names resolve: %s' % (not missing))
+        if missing:
+            print('    MISSING: %s' % missing)
 
     dts_out = os.path.join(args.outdir, shapename + '.dts')
     with open(dts_out, 'wb') as f:

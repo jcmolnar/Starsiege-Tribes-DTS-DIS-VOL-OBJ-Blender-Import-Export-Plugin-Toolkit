@@ -1,0 +1,271 @@
+r"""Add the Tribes player utility nodes a shape needs to be worn as an Armor.
+
+Tribes' Player looks up a handful of nodes by name and uses them for weapon
+mounting, the eye/camera, and the view-pitch override.  A shape imported from
+another Darkstar game (a Starsiege Herc, say) has none of them.  Nothing
+crashes without them -- every dereference site is guarded (see NOT_A_CRASH) --
+but weapons will not mount, the eye sits at the object origin, and the torso
+will not pitch with the view.  This tool appends the missing nodes.
+
+What Player wants (program/code/player.cpp):
+  "dummyalways root"      findNode, line 367  -> getTransform(rnode)
+  "dummyalways chasecam"  findNode, line 487
+  "dummy eye"             getNodeAtCurrentDetail, line 488
+  "dummy hand"            \  getNodeAtCurrentDetail, line 493, one per
+  "dummy unused"           \ MountPoint (PrimaryMount, SecondaryMount,
+  "dummy midback"          / BackpackMount, JetExhaust)
+  "dummy lowback"         /
+  "lowerback"             insertOverride, line 369 -- view pitch
+
+getNodeAtCurrentDetail (engine/Ts3/code/ts_shapeInst.cpp:2560) appends the
+detail's SIZE to the name, so detail 0 of a shape whose top LOD is size 64
+is asked for "dummy hand64" -- not "dummy hand0".  The per-detail nodes are
+therefore named by size, whatever the shape's own LOD suffix convention is.
+
+NOT_A_CRASH: a missing name yields -1, and both getTransform(int) and
+getNode(int) are unbounded (ts_shapeInst.h:670 / :641).  But every place the
+result is actually dereferenced is guarded by `if (node != -1)`
+(player.cpp:1359, playerInventory.cpp:556 and :630), and the one unguarded
+read -- getNode(mountNode[i]) at player.cpp:498 -- only dereferences `node`
+inside `if (dn != -1)`, which cannot be true when the detail-0 lookup already
+failed.  Stock Tribes proves this: larmor.dts has no "dummy unused" at all.
+
+Usage:
+    python tools/inject_player_nodes.py in.dts -o out.dts
+    python tools/inject_player_nodes.py in.dts -o out.dts --pitch-node head
+"""
+import argparse
+import os
+import struct
+import sys
+
+_TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_TOOLS_DIR))
+sys.path.insert(0, _TOOLS_DIR)
+
+from kaitaistruct import KaitaiStream, BytesIO   # noqa: E402
+from dts import Dts                               # noqa: E402
+
+NODE_SIZE = 20      # Nodev7:  name u4, parent s4, nSub u4, firstSub u4, dt u4
+XFORM_SIZE = 32     # Transformv7: Quat16(8) + Point3F(12) + Point3F(12)
+NAME_SIZE = 24
+
+# per-detail nodes: (base name, parent-preference by name prefix)
+PER_DETAIL = [
+    ('dummy hand',    ('right_pod', 'left_pod', 'head')),
+    ('dummy unused',  ('left_pod', 'right_pod', 'head')),
+    ('dummy midback', ('head',)),
+    ('dummy lowback', ('pelvis',)),
+    ('dummy eye',     ('cockpit', 'head')),
+]
+
+
+def clean(b):
+    return b.split(b'\x00')[0].decode('latin-1', 'replace')
+
+
+class ShapeV7:
+    """Just enough structure to append nodes/transforms/names to a v7 shape."""
+
+    def __init__(self, buf):
+        self.buf = buf
+        d = Dts(KaitaiStream(BytesIO(buf)))
+        self.version = d.shape.data.version
+        if self.version != 7:
+            raise ValueError('expected a version-7 shape, got %d' % self.version)
+        self.sh = d.shape.data.obj_data
+
+        p = 8                                   # 'PERS' + size
+        clen = struct.unpack_from('<H', buf, p)[0]
+        p += 2 + ((clen + 1) & ~1) + 4          # classname + pad + version
+        self.hdr = p                            # first count lives here
+        s = self.sh
+        self.off_nodes = p + 11 * 4 + 4 + 12    # counts + radius + center
+        self.off_seq = self.off_nodes + s.num_nodes * NODE_SIZE
+        self.off_subseq = self.off_seq + s.num_seq * 32
+        self.off_kf = self.off_subseq + s.num_subseq * 12
+        self.off_xf = self.off_kf + s.num_keyframes * 12
+        self.off_names = self.off_xf + s.num_transforms * XFORM_SIZE
+        self.off_objects = self.off_names + s.num_names * NAME_SIZE
+
+        # prove the layout arithmetic before we rewrite anything
+        for i, parsed in enumerate(s.names):
+            got = buf[self.off_names + i * NAME_SIZE:
+                      self.off_names + (i + 1) * NAME_SIZE]
+            if got != parsed:
+                raise ValueError('layout check failed at name %d: %r != %r'
+                                 % (i, clean(got), clean(parsed)))
+        self.names = [clean(n) for n in s.names]
+        self.nodes = s.nodes_v7
+
+    # ---------------------------------------------------------------
+    def node_name(self, i):
+        return self.names[self.nodes[i].name]
+
+    def subtree(self, root):
+        """Node indices in the subtree rooted at `root` (inclusive)."""
+        out, stack = [], [root]
+        while stack:
+            n = stack.pop()
+            out.append(n)
+            stack.extend(j for j, nd in enumerate(self.nodes) if nd.parent == n)
+        return out
+
+    def find_in(self, indices, prefixes):
+        """First node under `indices` whose name starts with any prefix."""
+        for pref in prefixes:
+            for i in indices:
+                if self.node_name(i).lower().startswith(pref):
+                    return i
+        return None
+
+    # ---------------------------------------------------------------
+    def build(self, new_nodes, renames=None):
+        """new_nodes: [(name, parent_index)].  Returns the patched bytes.
+
+        All new nodes share one identity transform appended to the pool, and
+        carry no subsequences, so no animation data has to be rewritten.
+        """
+        buf = self.buf
+        s = self.sh
+        n_new = len(new_nodes)
+
+        identity_xf = struct.pack('<4h', 0, 0, 0, 32767) + \
+            struct.pack('<3f', 0.0, 0.0, 0.0) + struct.pack('<3f', 1.0, 1.0, 1.0)
+        assert len(identity_xf) == XFORM_SIZE
+        xf_index = s.num_transforms          # index of the appended transform
+
+        name_bytes = bytearray()
+        node_bytes = bytearray()
+        for k, (nm, parent) in enumerate(new_nodes):
+            if len(nm) > NAME_SIZE - 1:
+                raise ValueError('name too long: %r' % nm)
+            name_bytes += nm.encode('latin-1').ljust(NAME_SIZE, b'\x00')
+            node_bytes += struct.pack('<IiIII',
+                                      s.num_names + k,   # name index
+                                      parent,            # parent node
+                                      0, 0,              # no subsequences
+                                      xf_index)          # default transform
+
+        # Each array is contiguous, so grow them in place:
+        #   header | nodes +NEW | seq..keyframes | transforms +NEW |
+        #   names +NEW | objects..meshes
+        out = bytearray()
+        out += buf[:self.off_seq]          # header + existing nodes
+        out += node_bytes                  # new nodes
+        out += buf[self.off_seq:self.off_names]   # seq, subseq, keyframes, xforms
+        out += identity_xf                 # the shared identity transform
+        out += buf[self.off_names:self.off_objects]   # existing names
+        out += name_bytes                  # new names
+        out += buf[self.off_objects:]      # objects, details, ..., meshes, mats
+
+        # fix the counts and the PERS payload size
+        struct.pack_into('<I', out, self.hdr + 0, s.num_nodes + n_new)
+        struct.pack_into('<I', out, self.hdr + 16, s.num_transforms + 1)
+        struct.pack_into('<I', out, self.hdr + 20, s.num_names + n_new)
+        struct.pack_into('<I', out, 4, len(out) - 8)     # PERS payload size
+
+        if renames:
+            base = self.off_names + len(node_bytes) + XFORM_SIZE
+            for idx, newname in renames:
+                struct.pack_into('<24s', out, base + idx * NAME_SIZE,
+                                 newname.encode('latin-1').ljust(NAME_SIZE, b'\x00'))
+        return bytes(out)
+
+
+def plan(shape, pitch_node=None):
+    """Work out which nodes to add (and any renames) for this shape."""
+    s = shape.sh
+    existing = {shape.node_name(i).lower() for i in range(len(shape.nodes))}
+    new_nodes = []
+    renames = []
+    notes = []
+
+    # one-off nodes, parented to node 0 (the shape root, "bounds")
+    for nm in ('dummyalways root', 'dummyalways chasecam'):
+        if nm.lower() in existing:
+            notes.append('%s already present' % nm)
+            continue
+        new_nodes.append((nm, 0))
+
+    # per-detail nodes, named by DETAIL SIZE (see module docstring)
+    for di, det in enumerate(s.details):
+        size = int(det.size)
+        if size <= 0:
+            continue                      # utility/collision details
+        root = det.root_node_index
+        sub = shape.subtree(root)
+        for base, prefs in PER_DETAIL:
+            nm = '%s%d' % (base, size)
+            if nm.lower() in existing:
+                continue
+            parent = shape.find_in(sub, prefs)
+            if parent is None:
+                parent = root
+            new_nodes.append((nm, parent))
+
+        if pitch_node:
+            # rename an existing node so insertOverride("lowerback",..) finds
+            # it -- that is what pitches the upper body with the view.
+            target = shape.find_in(sub, (pitch_node.lower(),))
+            if target is not None:
+                cur = shape.node_name(target)
+                if not cur.lower().startswith('lowerback'):
+                    renames.append((shape.nodes[target].name, 'lowerback%d' % size))
+                    notes.append('pitch: %s -> lowerback%d' % (cur, size))
+    return new_nodes, renames, notes
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('input')
+    ap.add_argument('-o', '--output', required=True)
+    ap.add_argument('--pitch-node', default=None,
+                    help='rename this node (by name prefix, e.g. "head") to '
+                         'lowerback<size> so the view-pitch override applies '
+                         'to the upper body')
+    args = ap.parse_args()
+
+    buf = open(args.input, 'rb').read()
+    shape = ShapeV7(buf)
+    print('%s: version %d, %d nodes, %d transforms, %d names'
+          % (os.path.basename(args.input), shape.version,
+             shape.sh.num_nodes, shape.sh.num_transforms, shape.sh.num_names))
+
+    new_nodes, renames, notes = plan(shape, args.pitch_node)
+    for n in notes:
+        print('  note: %s' % n)
+    print('  adding %d nodes:' % len(new_nodes))
+    for nm, parent in new_nodes:
+        print('    %-24s parent=%s' % (nm, shape.node_name(parent)))
+
+    out = shape.build(new_nodes, renames)
+    with open(args.output, 'wb') as f:
+        f.write(out)
+    print('  wrote %s (%d -> %d bytes)' % (args.output, len(buf), len(out)))
+
+    # --- verify by re-parsing and resolving exactly what the engine asks for
+    chk = ShapeV7(out)
+    cs = chk.sh
+    print('  verify: %d nodes, %d transforms, %d names, %d meshes parsed'
+          % (cs.num_nodes, cs.num_transforms, cs.num_names,
+             len(Dts(KaitaiStream(BytesIO(out))).meshes)))
+    have = {chk.node_name(i).lower(): i for i in range(len(chk.nodes))}
+    ok = True
+    wanted = ['dummyalways root', 'dummyalways chasecam']
+    for det in cs.details:
+        if int(det.size) > 0:
+            for base, _ in PER_DETAIL:
+                wanted.append('%s%d' % (base, int(det.size)))
+    for nm in wanted:
+        hit = have.get(nm.lower())
+        if hit is None:
+            print('    MISSING %s' % nm)
+            ok = False
+    print('    all %d engine-requested names resolve: %s' % (len(wanted), ok))
+    return 0 if ok else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
